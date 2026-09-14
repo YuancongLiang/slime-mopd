@@ -595,6 +595,8 @@ def train_one_step(
                     "returns",
                     "rollout_log_probs",
                     "teacher_log_probs",
+                    "opd_targets",
+                    "weight_versions",
                     "rollout_mask_sums",
                     # Only present when dumping train debug data; lets the loss
                     # snapshot each sample's log_probs keyed by rollout position.
@@ -636,7 +638,12 @@ def train_one_step(
             if args.enable_mtp_training:
                 forward_kwargs["mtp_kwargs"] = {"mtp_labels": batch["tokens"]}
 
-            output_tensor = model(**forward_kwargs)
+            if getattr(args, "opd_objective", "sampled") == "full_vocab_reverse_kl" and args.use_opd:
+                from slime.opd.megatron import distillation_head
+                with distillation_head(args, model, batch):
+                    output_tensor = model(**forward_kwargs)
+            else:
+                output_tensor = model(**forward_kwargs)
 
         if os.environ.get("ENABLE_ROUTING_REPLAY", "0") == "1":
             os.environ["ROUTING_REPLAY_STAGE"] = old_stage
@@ -683,6 +690,8 @@ def train_one_step(
         # Update learning rate. Use the per-step global_batch_size when dynamic
         # batching is on so the scheduler's samples-seen counter tracks reality.
         assert update_successful
+        if getattr(args, "opd_objective", "sampled") == "full_vocab_reverse_kl" and args.use_opd:
+            args._opd_optimizer_steps += 1
         opt_param_scheduler.step(increment=step_global_batch_size)
 
     # release grad

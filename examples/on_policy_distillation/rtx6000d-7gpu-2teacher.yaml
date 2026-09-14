@@ -1,0 +1,23 @@
+schema_version: 1
+opd:
+  backend: tilelang
+  chunk_tokens: 128
+  coefficient: 1.0
+  student_temperature: 1.0
+  teacher_temperature: 1.0
+  domain_key: domain
+  head_cache_bytes: 3221225472
+  max_context_tokens: 8192
+  timeout_seconds: 1800
+  prefetch_rollouts: false
+  max_policy_lag_optimizer_steps: 1
+  teachers:
+    math_rl:
+      version: math-v1
+      endpoints: [http://127.0.0.1:7999]
+    code_rl:
+      version: code-v1
+      endpoints: [http://127.0.0.1:8000]
+  domains:
+    math: {teacher: math_rl, sampling_weight: 1.0}
+    code: {teacher: code_rl, sampling_weight: 1.0}

@@ -66,6 +66,10 @@ class MegatronTrainRayActor(TrainRayActor):
             self.args = args
             return 0
 
+        if getattr(args, "opd_objective", "sampled") == "full_vocab_reverse_kl" and args.use_opd:
+            from slime.opd.config import configure
+            configure(args)
+
         monkey_patch_torch_dist()
         super().init(args, role, with_ref, with_opd_teacher)
         # Destroying and recreating WORLD invalidates raw dist.group.WORLD references cached by external code.
@@ -149,6 +153,16 @@ class MegatronTrainRayActor(TrainRayActor):
             model_name=type(self.hf_config).__name__.lower() if self.args.model_name is None else self.args.model_name,
             quantization_config=getattr(self.hf_config, "quantization_config", None),
         )
+        if getattr(args, "opd_objective", "sampled") == "full_vocab_reverse_kl" and args.use_opd:
+            from slime.opd.state import load_state
+            args._opd_optimizer_steps = 0
+            args._opd_version_steps = {}
+            args._opd_teacher_heads = {}
+            if (state := load_state(args.load, loaded_rollout_id, args.opd_resolved)) is not None:
+                args._opd_optimizer_steps = state["optimizer_steps"]
+                args._opd_version_steps = state["version_steps"]
+                args._opd_teacher_heads = state["teacher_heads"]
+                self.weight_updater.weight_version = state["latest_version"]
 
         # empty cache after initialization
         clear_memory()
@@ -553,6 +567,27 @@ class MegatronTrainRayActor(TrainRayActor):
         if force_sync and self.args.async_save:
             maybe_finalize_async_save(blocking=True)
 
+        if getattr(self.args, "opd_objective", "sampled") == "full_vocab_reverse_kl" and self.args.use_opd:
+            from slime.opd.megatron import unwrap
+            from slime.opd.state import save_state
+            local_heads = dict(self.args._opd_teacher_heads)
+            runtime = getattr(unwrap(self.model[0]), "_opd_targets", None)
+            if runtime is not None:
+                local_heads.update({name: {"version": version, "hash": value}
+                                    for (name, version), value in runtime.teacher_hashes.items()})
+            all_heads = [None] * dist.get_world_size()
+            dist.all_gather_object(all_heads, local_heads, group=get_gloo_group())
+            merged = {}
+            for heads in all_heads:
+                for name, value in heads.items():
+                    if name in merged and merged[name] != value:
+                        raise ValueError(f"Inconsistent teacher head for {name} across learner ranks")
+                    merged[name] = value
+            if dist.get_rank() == 0:
+                save_state(self.args.save, rollout_id, self.args.opd_resolved, self.args._opd_optimizer_steps,
+                           self.args._opd_version_steps, self.weight_updater.weight_version, merged)
+            dist.barrier(group=get_gloo_group())
+
         if self.args.save_hf is not None and self.role == "actor":
             save_hf_model_to_path(self.args, Path(self.args.save_hf.format(rollout_id=rollout_id)), self.model)
 
@@ -605,6 +640,10 @@ class MegatronTrainRayActor(TrainRayActor):
         with torch_memory_saver.disable() if self.args.offload_train else nullcontext():
             print_memory("before update_weights")
             self.weight_updater.update_weights()
+            if getattr(self.args, "opd_objective", "sampled") == "full_vocab_reverse_kl" and self.args.use_opd:
+                self.args._opd_version_steps[str(self.weight_updater.weight_version)] = self.args._opd_optimizer_steps
+                cutoff = self.args._opd_optimizer_steps - self.args.opd_resolved["max_policy_lag_optimizer_steps"]
+                self.args._opd_version_steps = {v: s for v, s in self.args._opd_version_steps.items() if s >= cutoff}
             print_memory("after update_weights")
 
             if getattr(self.args, "keep_old_actor", False):

@@ -1,3 +1,4 @@
+import copy
 import itertools
 import logging
 import time
@@ -188,7 +189,11 @@ class RolloutManager:
         set_current_rollout_id(rollout_id)
         self.health_monitoring_resume()
 
-        result = call_rollout_fn(self.eval_generate_rollout, self.args, rollout_id, self.data_source, evaluation=True)
+        eval_args = self.args
+        if getattr(self.args, "opd_objective", "sampled") == "full_vocab_reverse_kl" and self.args.use_opd:
+            eval_args = copy.copy(self.args)
+            eval_args.custom_rm_path = None
+        result = call_rollout_fn(self.eval_generate_rollout, eval_args, rollout_id, self.data_source, evaluation=True)
         data = result.data
         save_debug_rollout_data(
             self.args.save_debug_rollout_data,
@@ -417,6 +422,12 @@ class RolloutManager:
         if samples[0].teacher_log_probs is not None:
             train_data["teacher_log_probs"] = [sample.teacher_log_probs for sample in samples]
 
+        if getattr(self.args, "opd_objective", "sampled") == "full_vocab_reverse_kl" and self.args.use_opd:
+            if any(sample.opd_target is None for sample in samples):
+                raise ValueError("Full-vocabulary MOPD batch has samples without teacher targets")
+            train_data["opd_targets"] = [sample.opd_target for sample in samples]
+            train_data["weight_versions"] = [sample.weight_versions for sample in samples]
+
         if samples[0].metadata is not None:
             train_data["source_names"] = [get_source(sample) for sample in samples]
 
@@ -472,6 +483,8 @@ class RolloutManager:
                 "source_names",
                 "prompt",
                 "teacher_log_probs",
+                "opd_targets",
+                "weight_versions",
             ]:
                 if key not in data:
                     continue

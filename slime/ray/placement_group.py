@@ -39,12 +39,22 @@ def sort_key(x):
     return (node_ip_parts, int(gpu_id))
 
 
-def _create_placement_group(num_gpus):
+def _create_placement_group(num_gpus, node_ips=None):
     """Create a placement group with the specified number of GPUs."""
     if num_gpus == 0:
         return None, [], []
 
     bundles = [{"GPU": 1, "CPU": 1} for _ in range(num_gpus)]
+    if node_ips is not None:
+        if num_gpus % len(node_ips):
+            raise ValueError("Explicit OPD placement requires equal GPU counts per selected node")
+        nodes = {node["NodeManagerAddress"]: node for node in ray.nodes() if node["Alive"]}
+        per_node = num_gpus // len(node_ips)
+        for ip in node_ips:
+            if ip not in nodes or nodes[ip]["Resources"].get("GPU", 0) < per_node:
+                raise ValueError(f"OPD node {ip} is unavailable or has fewer than {per_node} GPUs")
+        for i, bundle in enumerate(bundles):
+            bundle[f"node:{node_ips[i // per_node]}"] = 0.001
     pg = placement_group(bundles, strategy="PACK")
     num_bundles = len(bundles)
 
@@ -120,6 +130,19 @@ def _get_placement_group_layout(args) -> tuple[int, int]:
 def create_placement_groups(args):
     """Create placement groups for actor, critic, and rollout engines."""
 
+    if getattr(args, "use_opd", False) and getattr(args, "opd_objective", "sampled") == "full_vocab_reverse_kl":
+        from slime.opd.config import configure
+        config = configure(args)
+        if (layout := config.get("placement")) is not None:
+            actor_gpus = args.actor_num_nodes * args.actor_num_gpus_per_node
+            if len(layout["learner_nodes"]) != args.actor_num_nodes:
+                raise ValueError("OPD learner_nodes must match --actor-num-nodes")
+            if args.rollout_external or args.debug_rollout_only:
+                raise ValueError("Explicit OPD placement currently requires managed rollout engines")
+            actor_pg = _create_placement_group(actor_gpus, layout["learner_nodes"])
+            rollout_pg = _create_placement_group(args.rollout_num_gpus, layout["rollout_nodes"])
+            return {"actor": actor_pg, "rollout": rollout_pg, "critic": None}
+
     num_gpus, rollout_offset = _get_placement_group_layout(args)
 
     logger.info(f"Creating placement group with {num_gpus} GPUs...")
@@ -166,6 +189,14 @@ def create_actor_model(args, pgs, rollout_manager, actor_cls=None):
         from slime.utils.arguments import parse_megatron_role_args
 
         actor_args = parse_megatron_role_args(args, args.megatron_config_path, role="actor")
+
+    if getattr(args, "use_opd", False) and getattr(args, "opd_objective", "sampled") == "full_vocab_reverse_kl":
+        from slime.opd.config import configure
+        if not actor_args.use_opd or actor_args.opd_objective != args.opd_objective:
+            raise ValueError("Actor role YAML cannot override the MOPD objective")
+        configure(actor_args)
+        if actor_args.opd_resolved != args.opd_resolved:
+            raise ValueError("Actor role YAML conflicts with the resolved MOPD configuration")
 
     actor_model_kwargs = {}
     if actor_cls is not None:

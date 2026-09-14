@@ -1131,11 +1131,13 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
             OPD is orthogonal to advantage estimators and can be applied on top of
             any estimator (GRPO, PPO, etc.) by adding a KL penalty to advantages.
             """
+            parser.add_argument("--opd-objective", choices=["sampled", "full_vocab_reverse_kl"], default="sampled")
+            parser.add_argument("--opd-config", type=str, default=None, help="Versioned full-vocabulary OPD YAML.")
             parser.add_argument(
                 "--use-opd",
                 action="store_true",
                 default=False,
-                help="Enable on-policy distillation (OPD). Must specify --opd-type when enabled.",
+                help="Enable OPD. Sampled mode requires --opd-type; full-vocabulary mode requires --opd-config.",
             )
             parser.add_argument(
                 "--opd-type",
@@ -1787,7 +1789,7 @@ def slime_validate_args(args):
             )
 
     # Validate on-policy distillation (OPD) arguments
-    if args.use_opd:
+    if args.use_opd and getattr(args, "opd_objective", "sampled") == "sampled":
         if args.opd_type is None:
             raise ValueError("--opd-type must be specified when --use-opd is enabled. Choose 'sglang' or 'megatron'.")
 
@@ -2021,6 +2023,10 @@ def slime_validate_args(args):
             if hasattr(args, k):
                 logger.info(f"Warning: Argument {k} is already set to {getattr(args, k)}, will override with {v}.")
             setattr(args, k, v)
+
+    if getattr(args, "opd_objective", "sampled") != "sampled" or getattr(args, "opd_config", None):
+        from slime.opd.config import configure
+        configure(args)
 
     if args.eval_max_context_len is None:
         logger.info(

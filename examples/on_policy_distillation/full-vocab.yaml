@@ -1,0 +1,47 @@
+schema_version: 1
+opd:
+  backend: tilelang
+  chunk_tokens: 256
+  coefficient: 1.0
+  student_temperature: 1.0
+  teacher_temperature: 1.0
+  domain_key: domain
+  head_cache_bytes: 8589934592
+  max_context_tokens: 32768
+  timeout_seconds: 1800
+  prefetch_rollouts: false
+  max_policy_lag_optimizer_steps: 1
+  teachers:
+    math_rl:
+      version: math-step-1000
+      endpoints: [http://teacher-t0:7999]
+    code_rl:
+      version: code-step-1000
+      endpoints: [http://teacher-t0:8000]
+    reasoning_rl:
+      version: reasoning-step-1000
+      endpoints: [http://teacher-t0:8001]
+    knowledge_rl:
+      version: knowledge-step-1000
+      endpoints: [http://teacher-t0:8002]
+    instruction_rl:
+      version: instruction-step-1000
+      endpoints: [http://teacher-t1:7999]
+    writing_rl:
+      version: writing-step-1000
+      endpoints: [http://teacher-t1:8000]
+    general_rl:
+      version: general-step-1000
+      endpoints: [http://teacher-t1:8001]
+  domains:
+    math: {teacher: math_rl, sampling_weight: 1.0}
+    code: {teacher: code_rl, sampling_weight: 1.0}
+    reasoning: {teacher: reasoning_rl, sampling_weight: 1.0}
+    knowledge: {teacher: knowledge_rl, sampling_weight: 1.0}
+    instruction: {teacher: instruction_rl, sampling_weight: 1.0}
+    writing: {teacher: writing_rl, sampling_weight: 1.0}
+    general: {teacher: general_rl, sampling_weight: 1.0}
+  # Use actual Ray node IP addresses when enabling explicit placement.
+  # placement:
+  #   learner_nodes: [10.0.0.1]
+  #   rollout_nodes: [10.0.0.2]

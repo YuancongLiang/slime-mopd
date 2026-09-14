@@ -87,9 +87,20 @@ class RolloutDataSource(DataSource):
         else:
             self.dataset = None
 
+        self.opd_sampler = None
+        if getattr(args, "opd_objective", "sampled") == "full_vocab_reverse_kl" and args.use_opd:
+            from slime.opd.sampling import DomainSampler
+            if self.dataset is None:
+                raise ValueError("Weighted MOPD sampling requires the global rollout dataset and --prompt-data")
+            self.opd_sampler = DomainSampler(self.dataset.samples, args.opd_resolved, args.rollout_seed, args.rollout_shuffle)
+
     def get_samples(self, num_samples):
         # TODO further improve code
-        if self.dataset is not None:
+        if self.opd_sampler is not None:
+            prompt_samples = [self.dataset.samples[i] for i in self.opd_sampler.draw(num_samples)]
+            self.sample_offset += num_samples
+            self.epoch_id = self.sample_offset // len(self.dataset)
+        elif self.dataset is not None:
             if self.sample_offset + num_samples <= len(self.dataset):
                 prompt_samples = self.dataset.samples[self.sample_offset : self.sample_offset + num_samples]
                 self.sample_offset += num_samples
@@ -131,6 +142,9 @@ class RolloutDataSource(DataSource):
             "sample_index": self.sample_index,
             "metadata": self.metadata,
         }
+        if self.opd_sampler is not None:
+            state_dict["opd_sampler"] = self.opd_sampler.state_dict()
+            state_dict["opd_buffer"] = [[sample.to_dict() for sample in group] for group in getattr(self, "buffer", [])]
         path = os.path.join(self.args.save, f"rollout/global_dataset_state_dict_{rollout_id}.pt")
         os.makedirs(os.path.dirname(path), exist_ok=True)
         torch.save(state_dict, path)
@@ -155,6 +169,14 @@ class RolloutDataSource(DataSource):
         self.sample_group_index = state_dict.get("sample_group_index", 0)
         self.sample_index = state_dict.get("sample_index", 0)
         self.metadata = state_dict.get("metadata", {})
+
+        if self.opd_sampler is not None:
+            if "opd_sampler" not in state_dict:
+                raise ValueError("Checkpoint has no MOPD sampler state; use a fresh rollout state for a new task")
+            self.opd_sampler.load_state_dict(state_dict["opd_sampler"])
+            if hasattr(self, "buffer"):
+                self.buffer = [[Sample.from_dict(sample) for sample in group] for group in state_dict.get("opd_buffer", [])]
+            return
 
         if self.args.rollout_global_dataset and self.args.rollout_shuffle and self.dataset is not None:
             self.dataset.shuffle(self.epoch_id)

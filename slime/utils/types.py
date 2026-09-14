@@ -126,6 +126,7 @@ class Sample:
     rollout_routed_experts: list[list[int]] | torch.Tensor | None = None  # Routed experts from rollout engine
     remove_sample: bool = False
     teacher_log_probs: list[float] | None = None  # Log probabilities from teacher model for OPD
+    opd_target: dict | None = None  # Immutable external teacher hidden descriptor; no tensor payload.
 
     class Status(Enum):
         PENDING = "pending"

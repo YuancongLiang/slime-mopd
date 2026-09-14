@@ -1324,6 +1324,8 @@ def loss_function(
     )
 
     match args.loss_type:
+        case "full_vocab_opd":
+            from slime.opd.megatron import loss as func
         case "policy_loss":
             func = policy_loss_function
         case "value_loss":
