@@ -17,7 +17,8 @@ async def reward_func(args, sample, **kwargs):
         raise ValueError(f"No MOPD teacher configured for domain {domain!r}")
     teacher_id = cfg["domains"][domain]["teacher"]
     teacher = cfg["teachers"][teacher_id]
-    if sample.multimodal_inputs or sample.multimodal_train_inputs:
+    has_media = any(value is not None for value in (sample.multimodal_inputs or {}).values())
+    if has_media or sample.multimodal_train_inputs:
         raise ValueError("Full-vocabulary MOPD currently supports text only")
     if len(sample.tokens) > cfg["max_context_tokens"]:
         raise ValueError("MOPD trajectory exceeds max_context_tokens; refusing silent truncation")

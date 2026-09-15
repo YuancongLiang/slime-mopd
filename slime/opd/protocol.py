@@ -38,7 +38,9 @@ def model_identity(checkpoint):
 def verify_info(info, teacher_id, teacher, identity):
     if info.get("protocol") != 1 or info.get("teacher_id") != teacher_id or info.get("version") != teacher["version"]:
         raise ValueError("Teacher protocol/id/version mismatch")
-    for key, value in identity.items():
+    # A pinned teacher architecture may differ; token semantics and tensor widths must still match.
+    expected = identity | {"model_hash": teacher.get("model_hash", identity["model_hash"])}
+    for key, value in expected.items():
         if info.get(key) != value:
             raise ValueError(f"Teacher {teacher_id} {key} mismatch: {info.get(key)!r} != {value!r}")
     if not isinstance(info.get("head_hash"), str) or len(info["head_hash"]) != 64:

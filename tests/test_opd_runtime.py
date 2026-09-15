@@ -1,3 +1,4 @@
+import asyncio
 import copy
 from argparse import Namespace
 
@@ -8,11 +9,47 @@ import yaml
 from safetensors.torch import save
 
 from slime.opd.config import configure, load_config
-from slime.opd.protocol import read_tensor_response, request_id
+from slime.opd.protocol import read_tensor_response, request_id, verify_info
+from slime.opd.rollout import reward_func
 from slime.opd.sampling import DomainSampler
 from slime.opd.teacher_server import CapacityError, TargetStore, build_app
 
 NUM_GPUS = 0
+
+
+def test_teacher_architecture_pin_keeps_token_and_shape_checks():
+    student = {"model_hash": "a" * 64, "tokenizer_hash": "b" * 64, "hidden_size": 2048, "vocab_size": 248320}
+    teacher = {"version": "v1", "model_hash": "c" * 64}
+    info = student | {
+        "model_hash": "c" * 64,
+        "protocol": 1,
+        "teacher_id": "teacher",
+        "version": "v1",
+        "head_hash": "d" * 64,
+    }
+    verify_info(info, "teacher", teacher, student)
+    with pytest.raises(ValueError, match="model_hash mismatch"):
+        verify_info(info, "teacher", {"version": "v1"}, student)
+    for key, value in {"model_hash": "e" * 64, "tokenizer_hash": "f" * 64, "hidden_size": 4096, "vocab_size": 128}.items():
+        with pytest.raises(ValueError, match=f"{key} mismatch"):
+            verify_info(info | {key: value}, "teacher", teacher, student)
+
+
+def test_teacher_architecture_pin_config_and_resume(tmp_path):
+    path, raw = config_file(tmp_path)
+    previous = load_config(path)
+    raw["opd"]["teachers"]["a"]["model_hash"] = "a" * 64
+    path.write_text(yaml.safe_dump(raw))
+    pinned = load_config(path)
+    assert previous["sampling_fingerprint"] != pinned["sampling_fingerprint"]
+    raw["opd"]["teachers"]["a"]["model_hash"] = "b" * 64
+    path.write_text(yaml.safe_dump(raw))
+    assert pinned["sampling_fingerprint"] != load_config(path)["sampling_fingerprint"]
+    for value in [None, 7, "bad", "g" * 64]:
+        raw["opd"]["teachers"]["a"]["model_hash"] = value
+        path.write_text(yaml.safe_dump(raw))
+        with pytest.raises(ValueError, match="model_hash"):
+            load_config(path)
 
 
 def config_file(tmp_path):
@@ -148,6 +185,64 @@ def test_hidden_http_roundtrip_and_padding():
             assert client.get(url + "/result/" + key).status_code == 404
     finally:
         handle.stop()
+
+
+@pytest.mark.parametrize("media", [None, {}, {"images": None, "videos": None}])
+def test_text_rollout_with_empty_media_metadata(media):
+    from slime.agent.aiohttp_threaded import run_app_in_thread
+
+    store, payload = store_and_payload()
+    handle = run_app_in_thread(build_app(store, torch.zeros(20, 8, dtype=torch.bfloat16)), host="127.0.0.1", port=0)
+    sample = Namespace(
+        metadata={"domain": "math"},
+        multimodal_inputs=media,
+        multimodal_train_inputs=None,
+        tokens=payload["tokens"],
+        response_length=payload["response_length"],
+        index=0,
+    )
+    args = Namespace(
+        opd_resolved={
+            "domain_key": "domain",
+            "domains": {"math": {"teacher": "a"}},
+            "teachers": {"a": {"version": "v1", "endpoints": [f"http://127.0.0.1:{handle.port}"]}},
+            "max_context_tokens": 100,
+            "timeout_seconds": 5,
+        }
+    )
+    try:
+        assert asyncio.run(reward_func(args, sample)) == 0.0
+        assert sample.opd_target["request_id"] == payload["request_id"]
+        assert store.next()[0] == payload["request_id"]
+        sample.multimodal_inputs = {"images": [object()], "videos": None}
+        with pytest.raises(ValueError, match="text only"):
+            asyncio.run(reward_func(args, sample))
+    finally:
+        handle.stop()
+
+
+def test_rollout_metrics_ignore_mopd_transport_metadata(monkeypatch):
+    from megatron.core import mpu
+    from slime.observability import train_metric_utils
+
+    monkeypatch.setattr(mpu, "get_tensor_model_parallel_rank", lambda: 0, raising=False)
+    monkeypatch.setattr(mpu, "is_pipeline_last_stage", lambda: True, raising=False)
+    monkeypatch.setattr(mpu, "get_context_parallel_world_size", lambda: 1, raising=False)
+    monkeypatch.setattr(mpu, "get_data_parallel_world_size", lambda **kwargs: 1, raising=False)
+    captured = {}
+    monkeypatch.setattr(train_metric_utils, "gather_log_data", lambda prefix, args, step, data: captured.update(data))
+    args = Namespace(ci_test=False, log_multi_turn=False, log_passrate=False, log_correct_samples=False)
+    batch = {
+        "response_lengths": [2],
+        "total_lengths": [3],
+        "loss_masks": [torch.ones(2)],
+        "global_batch_sizes": [1],
+        "rewards": [0.0],
+        "opd_targets": [{"teacher_id": "a", "request_id": "request"}],
+        "weight_versions": [["1"]],
+    }
+    train_metric_utils.log_rollout_data(0, args, batch)
+    assert captured == {"response_lengths": (2, 1), "total_lengths": (3, 1), "rewards": (0.0, 1)}
 
 
 def test_policy_lag_counts_optimizer_steps():

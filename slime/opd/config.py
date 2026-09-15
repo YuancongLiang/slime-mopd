@@ -67,7 +67,11 @@ def load_config(path):
         if not isinstance(cfg.get(key), dict) or not cfg[key]:
             raise ValueError(f"{key} must be a nonempty mapping")
     for name, teacher in cfg["teachers"].items():
-        _keys(teacher, {"version", "endpoints"}, f"teacher {name}")
+        _keys(teacher, {"version", "endpoints", "model_hash"}, f"teacher {name}")
+        if "model_hash" in teacher:
+            value = teacher["model_hash"]
+            if not isinstance(value, str) or len(value) != 64 or any(c not in "0123456789abcdef" for c in value):
+                raise ValueError(f"Teacher {name} model_hash must be a lowercase SHA256 digest")
         if not isinstance(name, str) or not isinstance(teacher.get("version"), str) or not teacher["version"]:
             raise ValueError("Teacher id and immutable version must be strings")
         urls = teacher.get("endpoints")
@@ -98,6 +102,9 @@ def load_config(path):
         "domain_key": cfg["domain_key"],
         "teachers": {name: item["version"] for name, item in cfg["teachers"].items()},
     }
+    model_hashes = {name: item["model_hash"] for name, item in cfg["teachers"].items() if "model_hash" in item}
+    if model_hashes:
+        semantics["teacher_model_hashes"] = model_hashes
     cfg["sampling_fingerprint"] = hashlib.sha256(json.dumps(semantics, sort_keys=True).encode()).hexdigest()
     return cfg
 
