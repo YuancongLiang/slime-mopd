@@ -1,3 +1,5 @@
+import time
+
 import aiohttp
 import torch
 
@@ -23,10 +25,14 @@ async def reward_func(args, sample, **kwargs):
         payload["image_data"] = [encode_image_for_rollout_engine(image) for image in image_data]
 
     session_kwargs = {}
+    started = time.perf_counter()
     async with aiohttp.ClientSession(**session_kwargs) as session:
         async with session.post(args.rm_url, json=payload) as resp:
             resp.raise_for_status()
-            return await resp.json()
+            result = await resp.json()
+    sample.metadata = sample.metadata or {}
+    sample.metadata.setdefault("opd_metrics", {})["target_wait_s"] = time.perf_counter() - started
+    return result
 
 
 def post_process_rewards(args, samples: list[Sample], **kwargs):

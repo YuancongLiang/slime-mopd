@@ -1133,6 +1133,18 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
             """
             parser.add_argument("--opd-objective", choices=["sampled", "full_vocab_reverse_kl"], default="sampled")
             parser.add_argument("--opd-config", type=str, default=None, help="Versioned full-vocabulary OPD YAML.")
+            parser.add_argument("--opd-domain-config", type=str, default=None,
+                                help="Teacher/domain YAML for sampled OPD; endpoints are SGLang server roots.")
+            parser.add_argument("--opd-metrics-interval", type=int, default=20,
+                                help="Sample OPD GPU timings every N rollout batches; 0 disables GPU timing.")
+            parser.add_argument("--opd-metrics-warmup", type=int, default=2)
+            parser.add_argument("--opd-metrics-dir", type=str, default=None,
+                                help="OPD JSONL directory; defaults to --save.")
+            parser.add_argument("--opd-benchmark-id", type=str, default=None)
+            parser.add_argument("--opd-benchmark-teacher-id", type=str, default=None,
+                                help="Common immutable teacher identity for matched sampled/full replay comparisons.")
+            parser.add_argument("--opd-refresh-replay-targets", action="store_true",
+                                help="Recompute sampled teacher targets when replaying saved trajectories.")
             parser.add_argument(
                 "--use-opd",
                 action="store_true",
@@ -2026,6 +2038,10 @@ def slime_validate_args(args):
 
     if getattr(args, "opd_objective", "sampled") != "sampled" or getattr(args, "opd_config", None):
         from slime.opd.config import configure
+        configure(args)
+
+    if getattr(args, "opd_domain_config", None):
+        from slime.opd.sampled import configure
         configure(args)
 
     if args.eval_max_context_len is None:

@@ -1,8 +1,11 @@
 """Bounded three-pool MOPD coordinator with checkpoint-safe single-batch prefetch."""
 
+import time
+
 import ray
 
 from slime.observability.logging_utils import configure_logger, finish_tracking, init_tracking
+from slime.observability.opd_metrics import PipelineMetrics
 from slime.opd.config import configure, enabled
 from slime.ray.placement_group import create_placement_groups, create_rollout_manager, create_training_models
 from slime.utils.arguments import parse_args
@@ -16,6 +19,7 @@ def should_prefetch(config, rollout_id, num_rollout, checkpoint_due):
 
 def train(args):
     configure_logger()
+    opd_metrics = PipelineMetrics(args)
     config = configure(args)
     if not enabled(args):
         raise ValueError("train_mopd.py requires --use-opd --opd-objective full_vocab_reverse_kl")
@@ -35,6 +39,7 @@ def train(args):
         if args.eval_interval is not None and not args.skip_eval_before_train:
             ray.get(rollout_manager.eval.remote(args.start_rollout_id))
         for rollout_id in range(args.start_rollout_id, args.num_rollout):
+            opd_metrics.begin()
             if pending is None:
                 pending = rollout_manager.generate.remote(rollout_id)
             current = ray.get(pending)
@@ -42,14 +47,19 @@ def train(args):
             pending = None
             if should_prefetch(config, rollout_id, args.num_rollout, checkpoint_due):
                 pending = rollout_manager.generate.remote(rollout_id + 1)
-            ray.get(actor.async_train(rollout_id, current))
+            learner_results = ray.get(actor.async_train(rollout_id, current))
+            excluded_s = 0.0
             if checkpoint_due:
+                save_start = time.perf_counter()
                 actor.save_model(rollout_id, force_sync=True)
                 ray.get(rollout_manager.save.remote(rollout_id))
+                excluded_s = time.perf_counter() - save_start
             # Finish student generation before publishing; teacher prefill is frozen and may continue.
             if pending is not None:
                 ray.get(pending)
             actor.update_weights()
+            workload = ray.get(rollout_manager.pop_opd_metrics.remote(rollout_id))
+            opd_metrics.finish(rollout_id, learner_results, workload, excluded_s)
             if should_run_periodic_action(rollout_id, args.eval_interval, per_epoch):
                 ray.get(rollout_manager.eval.remote(rollout_id))
     finally:

@@ -1,22 +1,12 @@
+import json
 import logging
 import os
 from copy import deepcopy
+from pathlib import Path
 
 import wandb
 
 logger = logging.getLogger(__name__)
-
-
-def _is_offline_mode(args) -> bool:
-    """Detect whether W&B should run in offline mode.
-
-    Priority order:
-    1) args.wandb_mode if provided
-    2) WANDB_MODE environment variable
-    """
-    if args.wandb_mode:
-        return args.wandb_mode == "offline"
-    return os.environ.get("WANDB_MODE") == "offline"
 
 
 def init_wandb_primary(args):
@@ -34,15 +24,16 @@ def init_wandb_primary(args):
         elif args.wandb_mode == "online":
             logger.info("W&B online mode enabled. Data will be uploaded to cloud.")
 
-    offline = _is_offline_mode(args)
+    mode = args.wandb_mode or os.environ.get("WANDB_MODE", "online")
 
-    # Only perform explicit login when NOT offline
-    if (not offline) and args.wandb_key is not None:
+    if mode == "online" and args.wandb_key is not None:
         wandb.login(key=args.wandb_key, host=args.wandb_host)
 
-    # Prepare wandb init parameters
-    # add random 6 length string with characters
-    if args.wandb_random_suffix:
+    identity = _load_opd_run(args)
+    run_id = args.wandb_run_id or identity.get("id")
+    if identity and run_id == identity["id"]:
+        group, run_name = identity["group"], identity["name"]
+    elif args.wandb_random_suffix:
         group = args.wandb_group + "_" + wandb.util.generate_id()
         run_name = f"{group}-RANK_{args.rank}"
     else:
@@ -51,18 +42,21 @@ def init_wandb_primary(args):
 
     # Prepare wandb init parameters
     init_kwargs = {
+        "id": run_id,
         "entity": args.wandb_team,
         "project": args.wandb_project,
         "group": group,
         "name": run_name,
         "config": _compute_config_for_logging(args),
     }
+    if run_id and mode == "online":
+        init_kwargs["resume"] = "allow"
 
     # Configure settings based on offline/online mode
-    if offline:
-        init_kwargs["settings"] = wandb.Settings(mode="offline")
-    else:
+    if mode == "online":
         init_kwargs["settings"] = wandb.Settings(mode="shared", x_primary=True)
+    else:
+        init_kwargs["settings"] = wandb.Settings(mode=mode)
 
     # Add custom directory if specified
     if args.wandb_dir:
@@ -77,6 +71,22 @@ def init_wandb_primary(args):
 
     # Set wandb_run_id in args for easy access throughout the training process
     args.wandb_run_id = wandb.run.id
+    if getattr(args, "use_opd", False) and getattr(args, "save", None) and mode != "disabled":
+        path = Path(args.save) / "wandb_run.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps({"id": wandb.run.id, "group": group, "name": run_name}) + "\n")
+        temporary.replace(path)
+
+
+def _load_opd_run(args):
+    if not getattr(args, "use_opd", False) or getattr(args, "finetune", False) or not getattr(args, "load", None):
+        return {}
+    directory = Path(args.load)
+    path = directory / "wandb_run.json"
+    if not (directory / "latest_checkpointed_iteration.txt").exists() or not path.exists():
+        return {}
+    return json.loads(path.read_text())
 
 
 def _compute_config_for_logging(args):
@@ -96,7 +106,27 @@ def _compute_config_for_logging(args):
 
 
 def _args_to_config_dict(args):
-    return deepcopy(args.__dict__)
+    return _redact_secrets(deepcopy(args.__dict__))
+
+
+def _redact_secrets(value):
+    if isinstance(value, dict):
+        output = {}
+        for key, item in value.items():
+            name = str(key).lower().replace("-", "_")
+            sensitive = (
+                name in {"wandb_key", "token", "authorization"}
+                or name.endswith("_token")
+                or any(
+                    word in name
+                    for word in ("password", "secret", "credential", "api_key", "access_key", "private_key")
+                )
+            )
+            output[key] = "[REDACTED]" if sensitive and item is not None else _redact_secrets(item)
+        return output
+    if isinstance(value, (list, tuple)):
+        return [_redact_secrets(item) for item in value]
+    return value
 
 
 def _prefix_config_keys(config, prefix):
@@ -129,20 +159,20 @@ def init_wandb_secondary(args, role=None):
     if args.wandb_mode:
         os.environ["WANDB_MODE"] = args.wandb_mode
 
-    offline = _is_offline_mode(args)
+    mode = args.wandb_mode or os.environ.get("WANDB_MODE", "online")
 
-    if (not offline) and args.wandb_key is not None:
+    if mode == "online" and args.wandb_key is not None:
         wandb.login(key=args.wandb_key, host=args.wandb_host)
 
     # Configure settings based on offline/online mode
-    if offline:
-        settings_kwargs = dict(mode="offline")
-    else:
+    if mode == "online":
         settings_kwargs = dict(
             mode="shared",
             x_primary=False,
             x_update_finish_state=False,
         )
+    else:
+        settings_kwargs = dict(mode=mode)
 
     init_kwargs = {
         "id": wandb_run_id,
@@ -173,4 +203,7 @@ def _init_wandb_common():
     wandb.define_metric("passrate/*", step_metric="rollout/step")
     wandb.define_metric("eval/step")
     wandb.define_metric("eval/*", step_metric="eval/step")
+    wandb.define_metric("opd/step")
+    wandb.define_metric("opd/*", step_metric="opd/step")
+    wandb.define_metric("perf/opd_*", step_metric="opd/step")
     wandb.define_metric("perf/*", step_metric="rollout/step")

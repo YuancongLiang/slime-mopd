@@ -8,6 +8,7 @@ import hashlib
 import queue
 import threading
 import time
+from collections import defaultdict, deque
 
 from .protocol import request_id
 
@@ -24,11 +25,14 @@ class TargetStore:
         self.reserved = 0
         self.lock = threading.Lock()
         self.pending = queue.Queue(maxsize=max_requests)
+        self.counters = defaultdict(int)
+        self.timings = {}
 
     def _prune(self):
         now = time.monotonic()
         for key, value in list(self.entries.items()):
             if value["state"] != "running" and now - value["created"] > self.ttl:
+                self.counters["expired_requests"] += 1
                 self._remove(key)
 
     def _remove(self, key):
@@ -56,12 +60,14 @@ class TargetStore:
         with self.lock:
             self._prune()
             if key in self.entries:
+                self.counters["duplicate_submissions"] += 1
                 return key
             if (
                 len(self.entries) >= self.max_requests
                 or self.reserved + required > self.max_bytes
                 or self.pending.full()
             ):
+                self.counters["capacity_rejections"] += 1
                 raise CapacityError("Teacher queue/cache is full; defer target until learner consumption")
             canonical = {"tokens": tokens, "response_length": length}
             self.entries[key] = {
@@ -70,7 +76,9 @@ class TargetStore:
                 "bytes": required,
                 "created": time.monotonic(),
                 "result": None,
+                "metrics": {},
             }
+            self.counters["submitted_requests"] += 1
             self.reserved += required
             self.pending.put_nowait(key)
         return key
@@ -80,12 +88,25 @@ class TargetStore:
             key = self.pending.get()
             with self.lock:
                 if key in self.entries:
-                    self.entries[key]["state"] = "running"
-                    return key, self.entries[key]["payload"]
+                    entry = self.entries[key]
+                    entry["state"] = "running"
+                    entry["metrics"]["queue_s"] = time.monotonic() - entry["created"]
+                    return key, entry["payload"]
 
-    def finish(self, key, result=None, error=None):
+    def finish(self, key, result=None, error=None, metrics=None):
         with self.lock:
             entry = self.entries[key]
+            entry["metrics"].update(metrics or {})
+            for name, value in entry["metrics"].items():
+                stat = self.timings.setdefault(name, {"sum": 0.0, "count": 0, "recent": deque(maxlen=256)})
+                stat["sum"] += value
+                stat["count"] += 1
+                stat["recent"].append(value)
+            self.counters["failed_requests" if error else "completed_requests"] += 1
+            if not error:
+                self.counters["input_tokens"] += len(entry["payload"]["tokens"])
+                self.counters["response_tokens"] += entry["payload"]["response_length"]
+                self.counters["result_bytes"] += len(result)
             entry.update(state="error" if error else "ready", result=result, error=error, created=time.monotonic())
             # The request token list is no longer needed once its digest identifies the result.
             entry["payload"] = None
@@ -109,7 +130,16 @@ class TargetStore:
             states = {state: 0 for state in ("queued", "running", "ready", "error")}
             for entry in self.entries.values():
                 states[entry["state"]] += 1
-            return states | {"reserved_bytes": self.reserved, "max_bytes": self.max_bytes}
+            timings = {
+                name: {"sum": stat["sum"], "count": stat["count"], "recent": list(stat["recent"])}
+                for name, stat in self.timings.items()
+            }
+            return states | {
+                "reserved_bytes": self.reserved,
+                "max_bytes": self.max_bytes,
+                "counters": dict(self.counters),
+                "timings": timings,
+            }
 
 
 def build_app(store, head):
@@ -145,7 +175,8 @@ def build_app(store, head):
         return web.Response(
             body=entry["result"],
             content_type="application/octet-stream",
-            headers={"X-OPD-Head": store.info["head_hash"]},
+            headers={"X-OPD-Head": store.info["head_hash"]}
+            | {f"X-OPD-{name.replace('_', '-')}": str(value) for name, value in entry["metrics"].items()},
         )
 
     async def release(request):
@@ -275,6 +306,7 @@ def main():
             request = [store.next() if args.rank == 0 else None]
             dist.broadcast_object_list(request, src=0)
             key, payload = request[0]
+            service_started = time.perf_counter()
             tokens = payload["tokens"]
             length = payload["response_length"]
             data = {
@@ -284,6 +316,10 @@ def main():
                 "loss_masks": [torch.ones(length, device="cuda", dtype=torch.int)],
             }
             batch = get_batch(DataIterator(data, [[0]]), list(data), args.data_pad_size_multiplier)
+            if args.rank == 0:
+                torch.cuda.reset_peak_memory_stats()
+                prefill_start, prefill_end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+                prefill_start.record()
             # Captures the final normalized prediction-head input, without executing the head GEMM.
             with torch.inference_mode(), head_forward(model, hidden_forward):
                 hidden = model(
@@ -295,12 +331,24 @@ def main():
                     loss_mask=batch["full_loss_masks"],
                 )
             if args.rank == 0:
+                prefill_end.record()
+                copy_started = time.perf_counter()
                 response_hidden = (
                     hidden[0, len(tokens) - length - 1 : len(tokens) - 1]
                     .to(device="cpu", dtype=torch.bfloat16)
                     .contiguous()
                 )
-                store.finish(key, save({"hidden": response_hidden}))
+                # The existing blocking CPU copy makes the prefill events readable without another synchronization.
+                metrics = {
+                    "prefill_s": prefill_start.elapsed_time(prefill_end) / 1000,
+                    "d2h_wait_s": time.perf_counter() - copy_started,
+                    "rank0_peak_allocated_bytes": torch.cuda.max_memory_allocated(),
+                }
+                serialize_started = time.perf_counter()
+                result = save({"hidden": response_hidden})
+                metrics["serialize_s"] = time.perf_counter() - serialize_started
+                metrics["service_s"] = time.perf_counter() - service_started
+                store.finish(key, result, metrics=metrics)
             del hidden
     finally:
         if handle is not None:

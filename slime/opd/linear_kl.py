@@ -7,6 +7,8 @@ from contextlib import contextmanager
 import torch
 import torch.distributed as dist
 
+from slime.observability.opd_metrics import get_collector
+
 
 class Workspace:
     """One synchronous compute stream; autograd saves no references to scratch."""
@@ -30,6 +32,11 @@ class Workspace:
                     "grad_logits": torch.empty(c, v, device=hidden.device, dtype=hidden.dtype),
                     "input": torch.empty(c, h, device=hidden.device, dtype=hidden.dtype),
                 }
+                get_collector().add("workspace_allocations", 1)
+                get_collector().add(
+                    "workspace_allocated_bytes",
+                    sum(t.numel() * t.element_size() for t in self.buffers[key].values()),
+                )
             yield self.buffers[key]
 
 
@@ -40,7 +47,8 @@ def _project(x, weight, out, temporary, temperature):
 
 def _reduce(tensor, op, group):
     if group is not None and dist.get_world_size(group) > 1:
-        dist.all_reduce(tensor, op=op, group=group)
+        with get_collector().time("kl_tp_reduce", gpu=tensor.is_cuda):
+            dist.all_reduce(tensor, op=op, group=group)
 
 
 def _stats(s, t, valid, group, backend):
@@ -98,7 +106,12 @@ class _LinearReverseKL(torch.autograd.Function):
         dtype = torch.float64 if hidden.dtype == torch.float64 else torch.float32
         loss = torch.empty(n, dtype=dtype, device=hidden.device)
         saved = torch.empty(4, n, dtype=dtype, device=hidden.device)
-        with workspace.lease(hidden, weight, chunk) as scratch:
+        collector = get_collector()
+        collector.add("head_loss_rows", n)
+        with (
+            collector.time("head_loss_forward", gpu=hidden.is_cuda),
+            workspace.lease(hidden, weight, chunk) as scratch,
+        ):
             for start in range(0, n, chunk):
                 end = min(start + chunk, n)
                 count = end - start
@@ -116,7 +129,10 @@ class _LinearReverseKL(torch.autograd.Function):
         valid, group, chunk, ts, tt, backend, workspace, main_grad = ctx.options
         dh = torch.empty_like(hidden)
         dw = weight.main_grad if main_grad else torch.zeros_like(weight)
-        with workspace.lease(hidden, weight, chunk) as scratch:
+        with (
+            get_collector().time("head_loss_backward", gpu=hidden.is_cuda),
+            workspace.lease(hidden, weight, chunk) as scratch,
+        ):
             for start in range(0, hidden.shape[0], chunk):
                 end = min(start + chunk, hidden.shape[0])
                 count = end - start
@@ -132,7 +148,7 @@ class _LinearReverseKL(torch.autograd.Function):
                     from megatron.core.tensor_parallel.layers import fused_weight_gradient_mlp_cuda
 
                     fused_weight_gradient_mlp_cuda.wgrad_gemm_accum_fp32(hidden[start:end], dz, dw)
-        _reduce(dh, dist.ReduceOp.SUM, group)
+            _reduce(dh, dist.ReduceOp.SUM, group)
         if main_grad:
             weight.grad_added_to_main_grad = True
             # Megatron DDP needs its parameter hook even though main_grad is already accumulated.

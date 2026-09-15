@@ -1,0 +1,12 @@
+schema_version: 1
+opd:
+  teachers:
+    math_rl:
+      version: math-v1
+      endpoints: [http://127.0.0.1:8999]
+    code_rl:
+      version: code-v1
+      endpoints: [http://127.0.0.1:9000]
+  domains:
+    math: {teacher: math_rl, sampling_weight: 1.0}
+    code: {teacher: code_rl, sampling_weight: 1.0}

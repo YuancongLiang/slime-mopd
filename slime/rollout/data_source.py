@@ -88,7 +88,7 @@ class RolloutDataSource(DataSource):
             self.dataset = None
 
         self.opd_sampler = None
-        if getattr(args, "opd_objective", "sampled") == "full_vocab_reverse_kl" and args.use_opd:
+        if getattr(args, "opd_resolved", None) and args.use_opd:
             from slime.opd.sampling import DomainSampler
             if self.dataset is None:
                 raise ValueError("Weighted MOPD sampling requires the global rollout dataset and --prompt-data")

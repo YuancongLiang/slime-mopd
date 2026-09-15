@@ -359,14 +359,20 @@ class MegatronTrainRayActor(TrainRayActor):
         if self.args.offload_train:
             self.wake_up()
 
+        from slime.observability.opd_metrics import finish_learner, get_collector
+        collector = get_collector()
+        if self.role == "actor":
+            collector.start(self.args, rollout_id)
+
         with timer("data_preprocess"):
             rollout_data = self._get_rollout_data(rollout_data_ref)
 
         if self.role == "critic":
             result = self.train_critic(rollout_id, rollout_data)
         else:
-            self.train_actor(rollout_id, rollout_data, external_data=external_data)
-            result = None
+            with collector.time("learner"):
+                self.train_actor(rollout_id, rollout_data, external_data=external_data)
+            result = finish_learner(self.args)
 
         if self.args.offload_train:
             del rollout_data
@@ -429,14 +435,16 @@ class MegatronTrainRayActor(TrainRayActor):
                 if "teacher" in self.weights_backuper.backup_tags:
                     if self.args.use_routing_replay:
                         os.environ["ROUTING_REPLAY_STAGE"] = "fallthrough"
-                    self._switch_model("teacher")
-                    rollout_data.update(
-                        self.compute_log_prob(
-                            data_iterator,
-                            num_microbatches,
-                            store_prefix="teacher_",
+                    from slime.observability.opd_metrics import get_collector
+                    with get_collector().time("target_prepare"):
+                        self._switch_model("teacher")
+                        rollout_data.update(
+                            self.compute_log_prob(
+                                data_iterator,
+                                num_microbatches,
+                                store_prefix="teacher_",
+                            )
                         )
-                    )
 
                 self._switch_model("old_actor" if self.args.keep_old_actor else "actor")
                 can_reuse_log_probs_in_loss = (

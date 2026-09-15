@@ -1,6 +1,7 @@
 """Start frozen-teacher prefill while subsequent student rollouts are generated."""
 
 import asyncio
+import time
 
 import aiohttp
 
@@ -25,11 +26,13 @@ async def reward_func(args, sample, **kwargs):
     endpoint = teacher["endpoints"][(sample.index or 0) % len(teacher["endpoints"])].rstrip("/")
     target = {
         "teacher_id": teacher_id,
+        "domain": domain,
         "version": teacher["version"],
         "endpoint": endpoint,
         "request_id": request_id(teacher_id, teacher["version"], sample.tokens, sample.response_length),
     }
     payload = target | {"tokens": sample.tokens, "response_length": sample.response_length}
+    started = time.perf_counter()
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=cfg["timeout_seconds"])) as session:
         async with session.post(endpoint + "/submit", json=payload) as response:
             # A full teacher cache must not stall completion of the global rollout batch.
@@ -39,5 +42,10 @@ async def reward_func(args, sample, **kwargs):
                 result = await response.json()
                 if result.get("request_id") != target["request_id"]:
                     raise ValueError("Teacher returned a mismatched request id")
+            deferred = int(response.status == 429)
+    sample.metadata = sample.metadata or {}
+    sample.metadata.setdefault("opd_metrics", {}).update(
+        teacher_submit_s=time.perf_counter() - started, teacher_deferred=deferred
+    )
     sample.opd_target = target
     return 0.0

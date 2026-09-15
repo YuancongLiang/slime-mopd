@@ -121,12 +121,7 @@ OPTIMIZER_ARGS=(
    --adam-beta2 0.98
 )
 
-WANDB_ARGS=(
-   #--use-wandb
-   # --wandb-project slime-dev
-   # --wandb-group qwen3-8B-test
-   # --wandb-key ${WANDB_KEY}
-)
+source "$(dirname -- "${BASH_SOURCE[0]}")/wandb-env.sh" qwen3-8B-sampled-sglang
 
 SGLANG_ARGS=(
    --rollout-num-gpus-per-engine 1
@@ -166,7 +161,7 @@ ray job submit --address="http://127.0.0.1:8265" \
    ${ROLLOUT_ARGS[@]} \
    ${OPTIMIZER_ARGS[@]} \
    ${GRPO_ARGS[@]} \
-   ${WANDB_ARGS[@]} \
+   "${WANDB_ARGS[@]}" \
    ${PERF_ARGS[@]} \
    ${EVAL_ARGS[@]} \
    ${SGLANG_ARGS[@]} \

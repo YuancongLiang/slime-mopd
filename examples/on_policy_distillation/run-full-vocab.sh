@@ -13,6 +13,7 @@ if [[ -n ${MEGATRON_ROOT:-} ]]; then
   export PYTHONPATH="$MEGATRON_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 fi
 source "$MODEL_PRESET"
+source "$(dirname -- "${BASH_SOURCE[0]}")/wandb-env.sh" "$(basename -- "$MODEL_PRESET" .sh)-full-vocab"
 
 exec python train_mopd.py \
   "${MODEL_ARGS[@]}" \
@@ -35,4 +36,5 @@ exec python train_mopd.py \
   --optimizer adam --lr "${LEARNING_RATE:-1e-6}" --lr-decay-style constant \
   --kl-coef 0 --entropy-coef 0 --attention-dropout 0 --hidden-dropout 0 \
   --accumulate-allreduce-grads-in-fp32 --attention-backend flash --qwen-gdn-backend fla \
+  "${WANDB_ARGS[@]}" \
   "$@"

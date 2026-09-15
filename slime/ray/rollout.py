@@ -176,11 +176,20 @@ class RolloutManager:
             evaluation=False,
         )
         log_rollout_data(rollout_id, self.args, data, metrics, time.time() - start_time)
+        if self.args.use_opd:
+            from slime.observability.opd_metrics import workload_metrics
+            if not hasattr(self, "_opd_batches"):
+                self._opd_batches = {}
+            domain_key = getattr(self.args, "opd_resolved", {}).get("domain_key", "domain")
+            self._opd_batches[rollout_id] = workload_metrics(data, domain_key)
         if self.args.debug_rollout_only:
             # if debug rollout only, we don't convert samples to train data and directly return
             return
         data = self._convert_samples_to_train_data(data)
         return self._split_train_data_by_dp(data)
+
+    def pop_opd_metrics(self, rollout_id):
+        return self._opd_batches.pop(rollout_id)
 
     def eval(self, rollout_id):
         if self.args.debug_train_only:
@@ -190,9 +199,10 @@ class RolloutManager:
         self.health_monitoring_resume()
 
         eval_args = self.args
-        if getattr(self.args, "opd_objective", "sampled") == "full_vocab_reverse_kl" and self.args.use_opd:
+        if self.args.use_opd and getattr(self.args, "opd_resolved", None):
             eval_args = copy.copy(self.args)
             eval_args.custom_rm_path = None
+            eval_args.custom_reward_post_process_path = None
         result = call_rollout_fn(self.eval_generate_rollout, eval_args, rollout_id, self.data_source, evaluation=True)
         data = result.data
         save_debug_rollout_data(
@@ -263,6 +273,13 @@ class RolloutManager:
                 rollout_id=rollout_id,
                 subsample_ratio=self.args.load_debug_rollout_data_subsample,
             )
+            if self.args.use_opd and (
+                self.args.opd_objective == "full_vocab_reverse_kl"
+                or self.args.opd_refresh_replay_targets
+            ):
+                from slime.opd.replay import prepare
+                from slime.utils.async_utils import run
+                run(prepare(self.args, data))
             metrics = None
         else:
             data = call_rollout_fn(self.generate_rollout, self.args, rollout_id, self.data_source, evaluation=False)
@@ -422,6 +439,10 @@ class RolloutManager:
         if samples[0].teacher_log_probs is not None:
             train_data["teacher_log_probs"] = [sample.teacher_log_probs for sample in samples]
 
+        if self.args.use_opd:
+            domain_key = getattr(self.args, "opd_resolved", {}).get("domain_key", "domain")
+            train_data["opd_domains"] = [(sample.metadata or {}).get(domain_key, "unknown") for sample in samples]
+
         if getattr(self.args, "opd_objective", "sampled") == "full_vocab_reverse_kl" and self.args.use_opd:
             if any(sample.opd_target is None for sample in samples):
                 raise ValueError("Full-vocabulary MOPD batch has samples without teacher targets")
@@ -484,6 +505,7 @@ class RolloutManager:
                 "prompt",
                 "teacher_log_probs",
                 "opd_targets",
+                "opd_domains",
                 "weight_versions",
             ]:
                 if key not in data:

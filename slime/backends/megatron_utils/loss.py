@@ -1337,10 +1337,20 @@ def loss_function(
         case _:
             raise ValueError(f"Unknown loss type: {args.loss_type}")
 
-    if args.recompute_loss_function:
-        loss, log = checkpoint(func, args, batch, logits, sum_of_sample_mean, use_reentrant=False)
-    else:
-        loss, log = func(args, batch, logits, sum_of_sample_mean)
+    from slime.observability.opd_metrics import get_collector
+    from slime.observability.opd_timing import finish_loss, sampled_loss_forward
+    with sampled_loss_forward(batch), get_collector().time("learner_loss", gpu=True):
+        if args.recompute_loss_function:
+            loss, log = checkpoint(func, args, batch, logits, sum_of_sample_mean, use_reentrant=False)
+        else:
+            loss, log = func(args, batch, logits, sum_of_sample_mean)
+
+    collector = get_collector()
+    if collector.enabled and batch.get("opd_reverse_kl") and args.context_parallel_size == 1:
+        domains = batch.get("opd_domains") or ["unknown"] * len(batch["loss_masks"])
+        for domain, values, mask in zip(domains, batch["opd_reverse_kl"], batch["loss_masks"], strict=True):
+            collector.add(f"domain/{domain}/sampled_kl_token_sum", (values * mask).sum())
+            collector.add(f"domain/{domain}/sampled_kl_token_count", mask.sum())
 
     # With allgather-CP, some CP ranks may have no loss-contributing tokens (e.g., all
     # padding). Without this, gradient doesn't flow through their attention path, so
@@ -1361,6 +1371,7 @@ def loss_function(
     else:
         loss = loss * mpu.get_context_parallel_world_size()
 
+    loss = finish_loss(batch, loss)
     return (
         loss,
         (num_tokens if args.calculate_per_token_loss else torch.tensor(1, device=logits.device)),

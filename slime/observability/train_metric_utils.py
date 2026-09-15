@@ -175,6 +175,7 @@ def log_rollout_data(
             "source_names",
             "local_raw_reward",
             "opd_targets",
+            "opd_domains",
             "weight_versions",
         }
         per_rollout_mean_keys = {

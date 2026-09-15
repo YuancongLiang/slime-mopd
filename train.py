@@ -1,6 +1,9 @@
+import time
+
 import ray
 
 from slime.observability.logging_utils import configure_logger, finish_tracking, init_tracking
+from slime.observability.opd_metrics import PipelineMetrics
 from slime.ray.placement_group import create_placement_groups, create_rollout_manager, create_training_models
 from slime.utils.arguments import parse_args
 from slime.utils.misc import should_run_periodic_action
@@ -8,6 +11,7 @@ from slime.utils.misc import should_run_periodic_action
 
 def train(args):
     configure_logger()
+    opd_metrics = PipelineMetrics(args)
     release_train = args.release_train
 
     # allocate the GPUs
@@ -50,6 +54,7 @@ def train(args):
         if args.eval_interval is not None and rollout_id == 0 and not args.skip_eval_before_train:
             ray.get(rollout_manager.eval.remote(rollout_id))
 
+        opd_metrics.begin()
         rollout_data_ref = ray.get(rollout_manager.generate.remote(rollout_id))
 
         if args.offload_rollout:
@@ -59,18 +64,21 @@ def train(args):
             actor_model.create()
 
         actor_trains = (not args.use_critic) or rollout_id >= args.num_critic_only_steps
+        learner_results = []
         if args.use_critic:
             value_refs = critic_model.async_train(rollout_id, rollout_data_ref)
             if actor_trains:
-                ray.get(actor_model.async_train(rollout_id, rollout_data_ref, external_data=value_refs))
+                learner_results = ray.get(actor_model.async_train(rollout_id, rollout_data_ref, external_data=value_refs))
             else:
                 ray.get(value_refs)
         else:
-            ray.get(actor_model.async_train(rollout_id, rollout_data_ref))
+            learner_results = ray.get(actor_model.async_train(rollout_id, rollout_data_ref))
 
+        excluded_s = 0.0
         if release_train or should_run_periodic_action(
             rollout_id, args.save_interval, num_rollout_per_epoch, args.num_rollout
         ):
+            save_start = time.perf_counter()
             force_sync = release_train or rollout_id == args.num_rollout - 1
             if actor_trains:
                 actor_model.save_model(rollout_id, force_sync=force_sync)
@@ -78,6 +86,7 @@ def train(args):
                 critic_model.save_model(rollout_id, force_sync=force_sync)
             if args.rollout_global_dataset:
                 ray.get(rollout_manager.save.remote(rollout_id))
+            excluded_s = time.perf_counter() - save_start
 
         offload_train(actor_trains)
         if args.offload_rollout and not release_train:
@@ -86,6 +95,10 @@ def train(args):
 
         if args.offload_rollout:
             ray.get(rollout_manager.onload_kv.remote())
+
+        if args.use_opd:
+            workload = ray.get(rollout_manager.pop_opd_metrics.remote(rollout_id))
+            opd_metrics.finish(rollout_id, learner_results, workload, excluded_s)
 
         if should_run_periodic_action(rollout_id, args.eval_interval, num_rollout_per_epoch):
             ray.get(rollout_manager.eval.remote(rollout_id))

@@ -29,6 +29,7 @@ try:
 except ImportError:
     from megatron.core.utils import unwrap_model
 from slime.observability import logging_utils, train_metric_utils
+from slime.observability.opd_timing import backward_timing, sampled_head
 from slime.utils.memory_utils import clear_memory
 
 from .checkpoint import load_checkpoint, save_checkpoint
@@ -595,6 +596,8 @@ def train_one_step(
                     "returns",
                     "rollout_log_probs",
                     "teacher_log_probs",
+                    "opd_reverse_kl",
+                    "opd_domains",
                     "opd_targets",
                     "weight_versions",
                     "rollout_mask_sums",
@@ -641,27 +644,40 @@ def train_one_step(
             if getattr(args, "opd_objective", "sampled") == "full_vocab_reverse_kl" and args.use_opd:
                 from slime.opd.megatron import distillation_head
                 with distillation_head(args, model, batch):
-                    output_tensor = model(**forward_kwargs)
+                    with opd_collector.time("learner_forward", gpu=True):
+                        output_tensor = model(**forward_kwargs)
             else:
-                output_tensor = model(**forward_kwargs)
+                with sampled_head(args, model, batch), opd_collector.time("learner_forward", gpu=True):
+                    output_tensor = model(**forward_kwargs)
+
+        if opd_collector.enabled:
+            from slime.opd.megatron import unwrap
+            if unwrap(model).post_process:
+                step_tokens.append(sum((mask > 0).sum() for mask in batch["loss_masks"]))
+                step_rows.append(sum(batch["response_lengths"]))
 
         if os.environ.get("ENABLE_ROUTING_REPLAY", "0") == "1":
             os.environ["ROUTING_REPLAY_STAGE"] = old_stage
 
         return output_tensor, partial(loss_function, args, batch, num_microbatches, step_global_batch_size)
 
+    from slime.observability.opd_metrics import get_collector
+    opd_collector = get_collector()
+    step_tokens, step_rows = [], []
+
     # Forward pass.
     forward_backward_func = get_forward_backward_func()
-    losses_reduced = forward_backward_func(
-        forward_step_func=_wrap_forward_step_with_microbatch_pbar(forward_step, microbatch_pbar),
-        data_iterator=data_iterator,
-        model=model,
-        num_microbatches=num_microbatches,
-        seq_length=args.seq_length,
-        micro_batch_size=args.micro_batch_size,
-        decoder_seq_length=args.decoder_seq_length,
-        forward_only=False,
-    )
+    with backward_timing(get_model_config(model[0])):
+        losses_reduced = forward_backward_func(
+            forward_step_func=_wrap_forward_step_with_microbatch_pbar(forward_step, microbatch_pbar),
+            data_iterator=data_iterator,
+            model=model,
+            num_microbatches=num_microbatches,
+            seq_length=args.seq_length,
+            micro_batch_size=args.micro_batch_size,
+            decoder_seq_length=args.decoder_seq_length,
+            forward_only=False,
+        )
 
     valid_step = True
     grad_norm = float("nan")
@@ -685,7 +701,8 @@ def train_one_step(
 
     if valid_step:
         # Update parameters.
-        update_successful, grad_norm, num_zeros_in_grad = optimizer.step()
+        with opd_collector.time("optimizer", gpu=True):
+            update_successful, grad_norm, num_zeros_in_grad = optimizer.step()
 
         # Update learning rate. Use the per-step global_batch_size when dynamic
         # batching is on so the scheduler's samples-seen counter tracks reality.
@@ -693,6 +710,11 @@ def train_one_step(
         if getattr(args, "opd_objective", "sampled") == "full_vocab_reverse_kl" and args.use_opd:
             args._opd_optimizer_steps += 1
         opt_param_scheduler.step(increment=step_global_batch_size)
+
+    opd_collector.add("computed_tokens", sum(step_rows))
+    opd_collector.add("effective_tokens", sum(step_tokens) if valid_step else 0)
+    opd_collector.add("updates", int(valid_step))
+    opd_collector.add("skipped_updates", int(not valid_step))
 
     # release grad
     for model_chunk in model:

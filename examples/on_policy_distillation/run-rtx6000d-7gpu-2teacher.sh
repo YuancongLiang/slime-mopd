@@ -15,6 +15,7 @@ export GLOBAL_BATCH=${GLOBAL_BATCH:-64}
 export PACKED_TOKENS=${PACKED_TOKENS:-4096}
 export NUM_ROLLOUT=${NUM_ROLLOUT:-100}
 export SAVE_INTERVAL=${SAVE_INTERVAL:-10}
+export WANDB_GROUP=${WANDB_GROUP:-${WANDB_RUN_GROUP:-qwen3.5-2B-2teacher-full-vocab}}
 
 if (( GLOBAL_BATCH <= 0 || GLOBAL_BATCH % 4 != 0 )); then
   echo "GLOBAL_BATCH must be positive and divisible by learner DP=4" >&2

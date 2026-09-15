@@ -2,6 +2,8 @@
 
 This example shows how to run **on-policy distillation (OPD)** using slime. A small student (Qwen3-8B) is aligned to imitate a larger teacher (Qwen3-32B) by training only on the student's own rollouts and matching the teacher's token-level log-probabilities.
 
+For full-vocabulary MOPD, see the [training guide](../../docs/zh/advanced/full-vocab-mopd.md). OPD scripts enable W&B by default; the [performance comparison guide](../../docs/zh/advanced/opd-performance.md) covers metrics, two-teacher sampled routing, and fixed-trajectory replay against full-vocabulary distillation.
+
 ## Key Features
 
 - **OPD is orthogonal to advantage estimators**: OPD works as an additive KL penalty on top of any advantage estimator (GRPO, PPO, REINFORCE++, etc.), not as a separate estimator.
