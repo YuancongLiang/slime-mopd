@@ -293,9 +293,17 @@ def distillation_head(args, model, batch):
 
 def loss(args, batch, output, sum_of_sample_mean):
     offset, parts = 0, []
-    for total, response in zip(batch["total_lengths"], batch["response_lengths"], strict=True):
+    for total, response, mask in zip(
+        batch["total_lengths"], batch["response_lengths"], batch["loss_masks"], strict=True
+    ):
+        if response <= 0 or total < response or len(mask) != response:
+            raise ValueError(
+                f"Invalid MOPD alignment: total_length={total}, response_length={response}, mask_length={len(mask)}"
+            )
         parts.append(output[0, offset + total - response - 1 : offset + total - 1, 0])
         offset += total
+    if sum(part.numel() for part in parts) != sum(batch["response_lengths"]):
+        raise ValueError("MOPD response logits are not aligned with response_lengths")
     collector = get_collector()
     if collector.enabled:
         for part, mask, target in zip(parts, batch["loss_masks"], batch["opd_targets"], strict=True):

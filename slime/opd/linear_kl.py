@@ -52,6 +52,9 @@ def _reduce(tensor, op, group):
 
 
 def _stats(s, t, valid, group, backend):
+    if valid == 0 and (group is None or dist.get_world_size(group) == 1):
+        zeros = s.new_zeros(s.shape[0], dtype=torch.float32)
+        return zeros, s.new_zeros((4, s.shape[0]), dtype=torch.float32)
     if backend == "tilelang":
         from .tilelang_kl import statistics
 

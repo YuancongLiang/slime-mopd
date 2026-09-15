@@ -55,8 +55,11 @@ def test_tilelang_statistics_and_gradient(vocab, valid):
     from slime.opd.linear_kl import _gradient, _stats
 
     if valid == 0:
-        # A wholly padded rank needs another rank's normalization; exercised in the TP test.
-        valid = 1
+        s = torch.randn(5, vocab, device="cuda")
+        t = torch.randn_like(s)
+        actual, stats = _stats(s, t, valid, None, "torch")
+        assert torch.isfinite(actual).all() and torch.isfinite(stats).all()
+        return
     torch.manual_seed(7)
     s = torch.randn(5, vocab, device="cuda")
     t = torch.randn_like(s)

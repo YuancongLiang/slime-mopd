@@ -107,6 +107,9 @@ def _scratch(s):
 
 
 def statistics(s, t, valid, group):
+    if valid == 0 and (group is None or dist.get_world_size(group) == 1):
+        zeros = s.new_zeros(s.shape[0], dtype=torch.float32)
+        return zeros, s.new_zeros((4, s.shape[0]), dtype=torch.float32)
     partial_max, maximum, partial_sum, moments, _, _ = _scratch(s)
     _max_kernel(s.shape[1], valid)(s, t, partial_max)
     torch.amax(partial_max, dim=-1, out=maximum)
