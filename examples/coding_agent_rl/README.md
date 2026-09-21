@@ -69,6 +69,40 @@ export SLIME_AGENT_SANDBOX_IMAGE_METADATA_KEY=image   # metadata key your gatewa
 bash examples/coding_agent_rl/run_qwen36_35b_a3b_swe_8nodes.sh
 ```
 
+For a one-node, 8-GPU end-to-end smoke test, use the single-node launcher. It
+uses all eight GPUs for both the colocated learner and one TP=8 SGLang engine,
+and defaults to one prompt, one sample, and one rollout:
+
+```bash
+export HF_CHECKPOINT=/path/to/Qwen3.6-35B-A3B
+export REF_MODEL_PATH=/path/to/Qwen3.6-35B-A3B_torch_dist
+export PROMPT_DATA=/path/to/swe-bench-verified-smoke.jsonl
+export SLIME_AGENT_NODE_TARBALL=/path/to/node-v22.x-linux-x64.tar.xz
+export SLIME_AGENT_CC_TARBALL=/path/to/anthropic-ai-claude-code-local-linux-x64.tgz
+export E2B_API_KEY=e2b_xxx
+
+bash examples/coding_agent_rl/run_qwen36_35b_a3b_swe_1node.sh
+```
+
+Start with a one-row SWE-bench JSONL and switch `PROMPT_DATA` to the full
+dataset after the smoke run succeeds. If the Megatron checkpoint has not been
+created yet, convert it first:
+
+```bash
+source scripts/models/qwen3.5-35B-A3B.sh
+PYTHONPATH=/root/Megatron-LM torchrun --nproc-per-node=8 \
+  tools/convert_hf_to_torch_dist.py "${MODEL_ARGS[@]}" \
+  --hf-checkpoint /path/to/Qwen3.6-35B-A3B \
+  --save /path/to/Qwen3.6-35B-A3B_torch_dist
+```
+
+Set `VALIDATE_ONLY=1` to check paths and parallelism without starting Ray. The
+single-node launcher also checks local E2B connectivity and requires at least
+60 GiB free on every GPU by default. Its Ray control port is 6380 because the
+local E2B deployment uses 6379 for Redis. It configures the local API and
+sandbox proxy at ports 3000 and 3002. Keep `E2B_DEBUG=false`: in the E2B SDK,
+debug mode means connecting directly to a standalone envd on port 49983.
+
 The launcher fans Ray out to every worker listed in `$HOSTFILE` (default
 `/root/mpi_rack_hostfile`, one worker IP per line, reachable over passwordless
 SSH as `root`) — create that file (or point `HOSTFILE` at your own) before
@@ -119,6 +153,7 @@ contract (read inside `slime/agent/`); `SWE_*` are this SWE example's task knobs
 | `ADAPTER_PUBLIC_HOST` | `${MASTER_ADDR}` | Public IP the sandbox uses to reach the Anthropic adapter. **Must be routable from inside the sandbox.** |
 | `ADAPTER_BIND_HOST` / `ADAPTER_PORT` | `0.0.0.0` / `18001` | Bind address of the Anthropic adapter on the host. |
 | `E2B_API_KEY` | — | E2B (or compatible) API key. |
+| `SLIME_AGENT_E2B_TEMPLATE_FROM_IMAGE` | unset | When true, pass the dataset image value as the E2B `template` argument. The single-node local-E2B launcher enables this by default. |
 | `SLIME_AGENT_SANDBOX_IMAGE_METADATA_KEY` | — | **Required.** Which metadata key the E2B gateway routes images by (e.g. `image`); each sample's `metadata.image` is passed under it. (Legacy `SWE_SANDBOX_IMAGE_METADATA_KEY` still accepted.) |
 | `SLIME_AGENT_NODE_TARBALL` | — | Host path to Node 22 tarball uploaded into each sandbox. |
 | `SLIME_AGENT_CC_TARBALL` | — | Host path to the Claude Code CLI npm tarball. |

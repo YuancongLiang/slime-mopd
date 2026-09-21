@@ -164,6 +164,7 @@ class E2BSandbox:
     lifetime_sec_env = ("SLIME_AGENT_SANDBOX_LIFETIME_SEC", "SWE_SANDBOX_LIFETIME_SEC")
     rpc_retries_env = ("SLIME_AGENT_SANDBOX_RPC_RETRIES", "SWE_RPC_RETRIES")
     size_env = ("SLIME_AGENT_E2B_SANDBOX_SIZE", "SWE_E2B_SANDBOX_SIZE")
+    template_from_image_env = "SLIME_AGENT_E2B_TEMPLATE_FROM_IMAGE"
 
     default_lifetime_sec = 3600
     default_rpc_retries = 6
@@ -203,6 +204,10 @@ class E2BSandbox:
     @classmethod
     def _size_from_env(cls) -> str:
         return _getenv(*cls.size_env, default=cls.default_size)
+
+    @classmethod
+    def _template_from_image(cls) -> bool:
+        return _getenv(cls.template_from_image_env).lower() in {"1", "true", "yes"}
 
     # Transient client-side failures safe to retry.
     _TRANSIENT_RPC_ERRORS = frozenset(
@@ -295,7 +300,11 @@ class E2BSandbox:
             size_key = f"{prefix}/size" if prefix else "size"
             md[size_key] = self.size
 
-        self._sb = await self._rpc_retry("create", lambda: AsyncSandbox.create(timeout=self.timeout, metadata=md))
+        template = self.image if self._template_from_image() else None
+        self._sb = await self._rpc_retry(
+            "create",
+            lambda: AsyncSandbox.create(template=template, timeout=self.timeout, metadata=md),
+        )
         self.sandbox_id = self._sb.sandbox_id
         return self
 

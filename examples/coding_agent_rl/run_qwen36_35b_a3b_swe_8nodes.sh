@@ -4,15 +4,7 @@
 # session on the Ray head node (a short-lived nohup launcher gets its Ray child
 # processes cleaned up with it).
 
-# Best-effort cleanup so a rerun does not collide with stale workers.
-pkill -9 sglang || true
-sleep 3
-ray stop --force || true
-pkill -9 ray || true
-sleep 3
-pkill -9 ray || true
-
-set -ex
+set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 SLIME_DIR="${SLIME_DIR:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
@@ -28,6 +20,7 @@ export ETP_SIZE="${ETP_SIZE:-1}"
 ROLLOUT_TP_SIZE="${ROLLOUT_TP_SIZE:-8}"
 ROLLOUT_DP_SIZE="${ROLLOUT_DP_SIZE:-8}"
 ROLLOUT_EP_SIZE="${ROLLOUT_EP_SIZE:-8}"
+ROLLOUT_NUM_GPUS="${ROLLOUT_NUM_GPUS:-64}"
 ROLLOUT_MEM_UTILIZATION="${ROLLOUT_MEM_UTILIZATION:-0.75}"
 
 # ============ Qwen3.5-35B-A3B architecture ============
@@ -47,6 +40,10 @@ printf -v MOE_LAYER_FREQ "[%s]" "$(IFS=', '; echo "${arr[*]}")"
 # ============ context length ============
 MAX_CONTEXT_LEN="${MAX_CONTEXT_LEN:-96000}"
 MAX_GEN_LEN="${MAX_GEN_LEN:-32768}"
+NUM_ROLLOUT="${NUM_ROLLOUT:-100}"
+ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-8}"
+N_SAMPLES_PER_PROMPT="${N_SAMPLES_PER_PROMPT:-8}"
+GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-$((ROLLOUT_BATCH_SIZE * N_SAMPLES_PER_PROMPT))}"
 
 # ============ paths — override before launching ============
 HF_CHECKPOINT="${HF_CHECKPOINT:-/path/to/Qwen3.6-35B-A3B}"
@@ -121,15 +118,15 @@ ROLLOUT_ARGS=(
    --input-key prompt
    --label-key label
    --metadata-key metadata
-   --num-rollout 100
-   --rollout-batch-size 8
-   --n-samples-per-prompt 8
+   --num-rollout "${NUM_ROLLOUT}"
+   --rollout-batch-size "${ROLLOUT_BATCH_SIZE}"
+   --n-samples-per-prompt "${N_SAMPLES_PER_PROMPT}"
    --rollout-max-context-len ${MAX_CONTEXT_LEN}
    --rollout-max-response-len ${MAX_GEN_LEN}
    --rollout-temperature 1.0
    --rollout-stop-token-ids 248046 248044
    --num-steps-per-rollout 1
-   --global-batch-size 64
+   --global-batch-size "${GLOBAL_BATCH_SIZE}"
    --micro-batch-size 1
    --save-debug-rollout-data "${RUN_ROOT}/rollout_dumps/rollout_{rollout_id}.pt"
 )
@@ -174,7 +171,7 @@ OPTIMIZER_ARGS=(
 )
 
 SGLANG_ARGS=(
-   --rollout-num-gpus 64
+   --rollout-num-gpus "${ROLLOUT_NUM_GPUS}"
    --rollout-num-gpus-per-engine ${ROLLOUT_TP_SIZE}
    --sglang-mem-fraction-static ${ROLLOUT_MEM_UTILIZATION}
    --sglang-enable-dp-attention
@@ -200,7 +197,9 @@ MISC_ARGS=(
 # ============ ray cluster network ============
 # Set MASTER_ADDR before the SWE block: ADAPTER_PUBLIC_HOST below falls back to it.
 export MASTER_ADDR="${MASTER_ADDR:-${MLP_WORKER_0_HOST:-$(hostname -I | awk '{print $1}')}}"
-export MASTER_PORT="${MASTER_PORT:-${MLP_WORKER_0_PORT:-6379}}"
+export MASTER_PORT="${MASTER_PORT:-${MLP_WORKER_0_PORT:-29500}}"
+RAY_PORT="${RAY_PORT:-6379}"
+RAY_DASHBOARD_PORT="${RAY_DASHBOARD_PORT:-8265}"
 export GLOO_SOCKET_IFNAME="${GLOO_SOCKET_IFNAME:-${MLP_SOCKET_IFNAME:-eth0}}"
 export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-${MLP_SOCKET_IFNAME:-eth0}}"
 
@@ -223,10 +222,15 @@ export SWE_AGENT_TIME_BUDGET_SEC="${SWE_AGENT_TIME_BUDGET_SEC:-1800}"
 export SWE_EVAL_TIMEOUT_SEC="${SWE_EVAL_TIMEOUT_SEC:-600}"
 export SWE_BOOT_CONCURRENCY="${SWE_BOOT_CONCURRENCY:-16}"
 
-# autoCompactWindow (80k) < MAX_CONTEXT_LEN (96k) so the CLI compacts before any
+# autoCompactWindow < MAX_CONTEXT_LEN so the CLI compacts before any
 # segment crosses the training-side cap. `investigator` is a read-only sub-agent
 # (a concrete dispatch target). WebFetch/WebSearch off (no outbound internet).
-SETTINGS_JSON='{"permissions":{"defaultMode":"bypassPermissions"},"autoCompactEnabled":true,"autoCompactWindow":80000}'
+AUTO_COMPACT_WINDOW="${AUTO_COMPACT_WINDOW:-$((MAX_CONTEXT_LEN - 4096))}"
+if (( AUTO_COMPACT_WINDOW <= 0 || AUTO_COMPACT_WINDOW >= MAX_CONTEXT_LEN )); then
+  echo "AUTO_COMPACT_WINDOW must be positive and smaller than MAX_CONTEXT_LEN" >&2
+  exit 2
+fi
+SETTINGS_JSON="{\"permissions\":{\"defaultMode\":\"bypassPermissions\"},\"autoCompactEnabled\":true,\"autoCompactWindow\":${AUTO_COMPACT_WINDOW}}"
 AGENTS_JSON='{"investigator":{"description":"Searches the repo for relevant files before any edit","prompt":"You are an investigator sub-agent. Use Grep/Read/Glob to find every file relevant to the user task, then return a short bulleted summary. Do NOT edit anything.","tools":["Grep","Read","Glob"]}}'
 export SLIME_AGENT_CC_EXTRA_ARGS="--settings '${SETTINGS_JSON}' --disable-slash-commands --agents '${AGENTS_JSON}' --disallowedTools WebFetch WebSearch"
 
@@ -234,7 +238,7 @@ export SLIME_AGENT_CC_EXTRA_ARGS="--settings '${SETTINGS_JSON}' --disable-slash-
 # export SWE_CC_PROMPT="Read PROBLEM_STATEMENT.md. BEFORE editing any file, dispatch the 'investigator' sub-agent (via the Agent tool with subagent_type=investigator) to locate every file relevant to the issue. Then fix the issue and run the tests."
 
 # ============ proxy bypass for in-cluster traffic ============
-export no_proxy="127.0.0.1,${MASTER_ADDR},${ADAPTER_PUBLIC_HOST}"
+export no_proxy="${no_proxy:-127.0.0.1},${MASTER_ADDR},${ADAPTER_PUBLIC_HOST}"
 export NO_PROXY="${no_proxy}"
 
 cd "${SLIME_DIR}"
@@ -244,8 +248,85 @@ HOSTFILE="${HOSTFILE:-/root/mpi_rack_hostfile}"
 ACTOR_NUM_NODES="${ACTOR_NUM_NODES:-${MLP_WORKER_NUM:-8}}"
 ACTOR_NUM_GPUS_PER_NODE="${ACTOR_NUM_GPUS_PER_NODE:-8}"
 
+required_paths=(HF_CHECKPOINT REF_MODEL_PATH PROMPT_DATA SLIME_AGENT_NODE_TARBALL SLIME_AGENT_CC_TARBALL)
+missing_paths=0
+for name in "${required_paths[@]}"; do
+  value="${!name}"
+  if [[ ! -e "${value}" ]]; then
+    echo "Missing ${name}: ${value}" >&2
+    missing_paths=1
+  fi
+done
+if (( missing_paths )); then
+  exit 2
+fi
+
+if (( TP_SIZE * PP_SIZE * CP_SIZE > ACTOR_NUM_NODES * ACTOR_NUM_GPUS_PER_NODE )); then
+  echo "TP_SIZE * PP_SIZE * CP_SIZE exceeds the actor world size" >&2
+  exit 2
+fi
+if (( (ACTOR_NUM_NODES * ACTOR_NUM_GPUS_PER_NODE) % (TP_SIZE * PP_SIZE * CP_SIZE) != 0 )); then
+  echo "Actor world size must be divisible by TP_SIZE * PP_SIZE * CP_SIZE" >&2
+  exit 2
+fi
+if (( ROLLOUT_NUM_GPUS % ROLLOUT_TP_SIZE != 0 )); then
+  echo "ROLLOUT_NUM_GPUS must be divisible by ROLLOUT_TP_SIZE" >&2
+  exit 2
+fi
+if (( ROLLOUT_DP_SIZE * ROLLOUT_TP_SIZE != ROLLOUT_NUM_GPUS )); then
+  echo "ROLLOUT_DP_SIZE * ROLLOUT_TP_SIZE must equal ROLLOUT_NUM_GPUS" >&2
+  exit 2
+fi
+
+if [[ "${VALIDATE_ONLY:-0}" == "1" ]]; then
+  echo "Configuration validation passed."
+  exit 0
+fi
+
+if [[ "${E2B_PREFLIGHT:-0}" == "1" ]]; then
+  if ! timeout "${E2B_PREFLIGHT_TIMEOUT_SEC:-20}s" python3 - <<'PY'
+import asyncio
+from e2b import AsyncSandbox
+
+async def main():
+    await AsyncSandbox.list(limit=1).next_items()
+
+asyncio.run(main())
+PY
+  then
+    echo "E2B preflight failed: the configured API/key did not list sandboxes in time." >&2
+    echo "Check E2B_API_URL, E2B_API_KEY, and the E2B database/Redis health." >&2
+    exit 2
+  fi
+  echo "E2B preflight passed."
+fi
+
+# Best-effort cleanup so a rerun does not collide with stale slime workers.
+if [[ "${SKIP_CLEANUP:-0}" != "1" ]]; then
+  pkill -9 sglang || true
+  ray stop --force || true
+  pkill -9 ray || true
+  sleep 3
+fi
+
+GPU_COUNT="$(nvidia-smi --query-gpu=index --format=csv,noheader | wc -l)"
+if (( GPU_COUNT < ACTOR_NUM_GPUS_PER_NODE )); then
+  echo "Need ${ACTOR_NUM_GPUS_PER_NODE} visible GPUs, found ${GPU_COUNT}." >&2
+  exit 2
+fi
+MIN_GPU_FREE_MIB="${MIN_GPU_FREE_MIB:-0}"
+if (( MIN_GPU_FREE_MIB > 0 )); then
+  GPU_MIN_FREE_MIB="$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | sort -n | head -n1)"
+  if (( GPU_MIN_FREE_MIB < MIN_GPU_FREE_MIB )); then
+    echo "Insufficient free GPU memory: minimum is ${GPU_MIN_FREE_MIB} MiB; require ${MIN_GPU_FREE_MIB} MiB." >&2
+    echo "Stop other GPU workloads or override MIN_GPU_FREE_MIB after checking capacity." >&2
+    exit 2
+  fi
+fi
+
 ray start --head --node-ip-address "${MASTER_ADDR}" --num-gpus "${ACTOR_NUM_GPUS_PER_NODE}" \
-   --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265
+   --port "${RAY_PORT}" --disable-usage-stats --dashboard-host=0.0.0.0 \
+   --dashboard-port="${RAY_DASHBOARD_PORT}"
 
 if [[ -f "${HOSTFILE}" ]]; then
   for WORKER_IP in $(awk '{print $1}' "${HOSTFILE}"); do
@@ -254,14 +335,14 @@ if [[ -f "${HOSTFILE}" ]]; then
     echo "Starting Ray worker on ${WORKER_IP}"
     ssh -o StrictHostKeyChecking=no "root@${WORKER_IP}" \
       "pkill -9 sglang ; ray stop --force ; pkill -9 python ; \
-       ray start --address=${MASTER_ADDR}:6379 --num-gpus ${ACTOR_NUM_GPUS_PER_NODE} \
+       ray start --address=${MASTER_ADDR}:${RAY_PORT} --num-gpus ${ACTOR_NUM_GPUS_PER_NODE} \
          --node-ip-address ${WORKER_IP} --disable-usage-stats" &
   done
   wait
 fi
 
 echo "Waiting for Ray cluster to stabilize..."
-sleep 30
+sleep "${RAY_STARTUP_WAIT_SEC:-30}"
 ray status
 
 # ============ runtime env propagated to ray workers ============
@@ -271,7 +352,9 @@ import json, os
 keys = (
     "no_proxy", "NO_PROXY",
     "SWE_AGENT",
-    "E2B_API_KEY", "ADAPTER_PUBLIC_HOST",
+    "E2B_API_KEY", "E2B_API_URL", "E2B_SANDBOX_URL", "E2B_DOMAIN", "E2B_DEBUG",
+    "SLIME_AGENT_E2B_TEMPLATE_FROM_IMAGE",
+    "ADAPTER_PUBLIC_HOST",
     "SLIME_AGENT_NODE_TARBALL", "SLIME_AGENT_CC_TARBALL",
     "SWE_AGENT_TIME_BUDGET_SEC", "SWE_EVAL_TIMEOUT_SEC", "SWE_BOOT_CONCURRENCY",
     "ADAPTER_BIND_HOST", "ADAPTER_PORT",
@@ -294,7 +377,7 @@ print(json.dumps({"env_vars": env}))
 PY
 )
 
-ray job submit --address="http://127.0.0.1:8265" \
+ray job submit --address="http://127.0.0.1:${RAY_DASHBOARD_PORT}" \
    --runtime-env-json="${RUNTIME_ENV_JSON}" \
    -- python3 -u train.py \
    --actor-num-nodes "${ACTOR_NUM_NODES}" \
