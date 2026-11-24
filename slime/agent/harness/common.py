@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import lzma
 import os
+import shlex
 import shutil
 import tempfile
 from abc import ABC, ABCMeta, abstractmethod
@@ -108,6 +109,11 @@ async def run_agent(sb: Sandbox, *, workdir: str, start_cmd: str, env: dict[str,
     """Launch the agent (start_cmd) and run it to completion, returning its exit code."""
     meta_dir = f"{workdir}/.harness"
     await sb.exec(f"mkdir -p {meta_dir} && chown agent:agent {meta_dir}", user="root", check=True, timeout=30)
+    # Task preparation may install a shell environment here. Source it for the
+    # CLI and for its non-interactive Bash tools, which otherwise use the image's
+    # base Python rather than the repository's prepared environment.
+    env_file = shlex.quote(f"{meta_dir}/env.sh")
+    start_cmd = f"if [ -f {env_file} ]; then export BASH_ENV={env_file}; . {env_file}; else true; fi &&\n{start_cmd}"
     exit_code, _ = await exec_and_wait(
         sb,
         cmd=start_cmd,

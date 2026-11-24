@@ -1,5 +1,6 @@
 import os
 import shutil
+import sys
 import time
 from pathlib import Path
 
@@ -90,6 +91,10 @@ class RayTrainGroup:
                 )
 
             env_vars["LD_PRELOAD"] = dynlib_path
+            conda_lib_dir = os.path.join(sys.prefix, "lib")
+            env_vars["LD_LIBRARY_PATH"] = os.pathsep.join(
+                path for path in (conda_lib_dir, env_vars.get("LD_LIBRARY_PATH", os.environ.get("LD_LIBRARY_PATH"))) if path
+            )
             env_vars["TMS_INIT_ENABLE"] = "1"
             env_vars["TMS_INIT_ENABLE_CPU_BACKUP"] = "1"
 

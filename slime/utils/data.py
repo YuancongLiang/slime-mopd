@@ -256,7 +256,7 @@ class Dataset:
             else:
                 output_prompt = prompt
 
-            if processor:
+            if processor and multimodal_keys is not None:
                 from slime.utils.processing_utils import process_vision_info
 
                 assert isinstance(

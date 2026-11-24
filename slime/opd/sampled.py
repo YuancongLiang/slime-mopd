@@ -12,7 +12,10 @@ def configure(args):
         raise ValueError("--opd-domain-config requires sampled OPD with an SGLang teacher")
     args.opd_resolved = load_config(args.opd_domain_config)
     args.custom_rm_path = "slime.opd.sampled.reward_func"
-    args.custom_reward_post_process_path = "slime.rollout.on_policy_distillation.post_process_rewards"
+    # An independent sample hook can prepare teacher targets while preserving
+    # scalar task rewards. Keep its explicitly selected postprocessor.
+    if getattr(args, "custom_reward_post_process_path", None) != "rollout_environment.slime_rewards.post_process_rewards":
+        args.custom_reward_post_process_path = "slime.rollout.on_policy_distillation.post_process_rewards"
 
 
 async def reward_func(args, sample, **kwargs):

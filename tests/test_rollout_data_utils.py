@@ -5,9 +5,11 @@ import pytest
 import torch
 
 from slime.observability.rollout_data_utils import (
+    flatten_rollout_samples,
     load_debug_rollout_data,
     save_debug_rollout_data,
     tensorize_rollout_data_for_training,
+    validate_rollout_id_annotated,
     validate_rollout_routed_experts_for_replay,
 )
 from slime.utils.types import Sample
@@ -96,6 +98,30 @@ def test_save_debug_eval_rollout_data_flattens_datasets(tmp_path):
     saved = torch.load(tmp_path / "rollout_eval_4.pt", weights_only=False)
     assert saved["rollout_id"] == 4
     assert [sample["index"] for sample in saved["samples"]] == [1, 2]
+
+
+@pytest.mark.parametrize("interactive_first", [False, True])
+def test_mixed_rollout_shapes_preserve_order_and_identity(interactive_first):
+    ordinary = [Sample(index=0), Sample(index=1)]
+    segments = [Sample(index=2, rollout_id=2), Sample(index=2, rollout_id=2)]
+    groups = [[segments], ordinary] if interactive_first else [ordinary, [segments]]
+    expected = segments + ordinary if interactive_first else ordinary + segments
+    validate_rollout_id_annotated(groups)
+    assert [id(s) for s in flatten_rollout_samples(groups)] == [id(s) for s in expected]
+    assert flatten_rollout_samples([[], [[]]]) == []
+
+
+@pytest.mark.parametrize("ids", [(None, None), (4, 5)])
+def test_mixed_rollout_still_validates_nested_episode_ids(ids):
+    # A leading ordinary Sample must not hide nested compact episodes.
+    group = [Sample(index=0), [Sample(rollout_id=rid) for rid in ids]]
+    with pytest.raises(AssertionError, match="rollout_id"):
+        validate_rollout_id_annotated([group])
+
+
+def test_flatten_rollout_rejects_non_sample_leaves():
+    with pytest.raises(TypeError, match="unexpected rollout output node type"):
+        flatten_rollout_samples([[Sample()], {"index": 1}])
 
 
 if __name__ == "__main__":

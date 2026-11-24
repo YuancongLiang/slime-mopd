@@ -41,7 +41,7 @@ def sdk(monkeypatch):
         login=Mock(),
         Settings=lambda **values: values,
         define_metric=Mock(),
-        util=SimpleNamespace(generate_id=lambda: "suffix"),
+        util=SimpleNamespace(),
     )
 
     def init(**kwargs):
@@ -49,6 +49,7 @@ def sdk(monkeypatch):
 
     fake.init.side_effect = init
     monkeypatch.setattr(wandb_utils, "wandb", fake)
+    monkeypatch.setattr(wandb_utils, "generate_id", lambda: "suffix")
     return fake
 
 

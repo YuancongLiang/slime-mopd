@@ -1,5 +1,4 @@
 import copy
-import itertools
 import logging
 import time
 from typing import Any
@@ -11,6 +10,7 @@ from slime.backends.sglang_utils.deployment import start_rollout_servers
 from slime.observability import logging_utils
 from slime.observability.logging_utils import configure_logger, init_tracking
 from slime.observability.rollout_data_utils import (
+    flatten_rollout_samples,
     load_debug_rollout_data,
     save_debug_rollout_data,
     tensorize_rollout_data_for_training,
@@ -292,9 +292,8 @@ class RolloutManager:
             # set the same rollout_id on every sibling so the loss reducer counts
             # the rollout once instead of N times.
             validate_rollout_id_annotated(data)
-            # flatten the data if it is a list of lists
-            while isinstance(data[0], list):
-                data = list(itertools.chain.from_iterable(data))
+            # Mixed batches contain both ordinary Samples and episode segments.
+            data = flatten_rollout_samples(data)
 
         return data, metrics
 

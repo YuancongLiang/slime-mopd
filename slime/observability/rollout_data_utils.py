@@ -106,7 +106,7 @@ def validate_rollout_id_annotated(node, depth=0):
     if isinstance(node, Sample):
         return
     assert isinstance(node, list), f"unexpected rollout output node type: {type(node).__name__}"
-    if node and isinstance(node[0], Sample):
+    if node and all(isinstance(item, Sample) for item in node):
         if depth >= 2 and len(node) > 1:
             rids = [sample.rollout_id for sample in node]
             missing = [i for i, rollout_id in enumerate(rids) if rollout_id is None]
@@ -119,6 +119,15 @@ def validate_rollout_id_annotated(node, depth=0):
         return
     for item in node:
         validate_rollout_id_annotated(item, depth + 1)
+
+
+def flatten_rollout_samples(node) -> list[Sample]:
+    """Flatten mixed ordinary Samples and per-episode segment lists in order."""
+    if isinstance(node, Sample):
+        return [node]
+    if not isinstance(node, list):
+        raise TypeError(f"unexpected rollout output node type: {type(node).__name__}")
+    return [sample for item in node for sample in flatten_rollout_samples(item)]
 
 
 def load_debug_rollout_data(path_template, *, rollout_id: int, subsample_ratio=None) -> list[Sample]:

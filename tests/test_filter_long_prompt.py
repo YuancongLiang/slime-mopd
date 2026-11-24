@@ -13,12 +13,13 @@ text-only prompt before any prompt carrying an image.
 
 from __future__ import annotations
 
+import json
 import sys
 import types
 
 import pytest
 
-from slime.utils.data import filter_long_prompt
+from slime.utils.data import Dataset, filter_long_prompt
 from slime.utils.types import Sample
 
 
@@ -50,6 +51,11 @@ class _Processor:
 
     def __call__(self, text=None, **kwargs):
         return {"input_ids": [[0] * _encoded_length(text)]}
+
+
+class _UnexpectedProcessor:
+    def __call__(self, *args, **kwargs):
+        raise AssertionError("text-only samples must not use the multimodal processor")
 
 
 def _encoded_length(prompt: str) -> int:
@@ -110,6 +116,23 @@ def test_no_processor_path_still_preserves_order():
     kept = filter_long_prompt(samples, _Tokenizer(), None, max_length=100)
 
     assert [s.prompt for s in kept] == ["p0:5", "p2:5"]
+
+
+@pytest.mark.unit
+def test_dataset_ignores_processor_for_text_only_samples(tmp_path):
+    path = tmp_path / "prompts.jsonl"
+    path.write_text(json.dumps({"prompt": "plain text"}) + "\n", encoding="utf-8")
+
+    dataset = Dataset(
+        str(path),
+        tokenizer=_Tokenizer(),
+        processor=_UnexpectedProcessor(),
+        max_length=None,
+        prompt_key="prompt",
+    )
+
+    assert dataset[0].prompt == "plain text"
+    assert dataset[0].multimodal_inputs is None
 
 
 if __name__ == "__main__":

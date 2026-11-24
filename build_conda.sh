@@ -3,9 +3,12 @@
 set -ex
 
 export SLIME_DIR="${SLIME_DIR:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)}"
+export PATH="/root/.local/bin:${PATH}"
 
 # create conda
-yes '' | "${SHELL}" <(curl -L micro.mamba.pm/install.sh)
+if [ ! -x /root/.local/bin/micromamba ]; then
+  yes '' | "${SHELL}" <(curl -L micro.mamba.pm/install.sh)
+fi
 export PS1=tmp
 mkdir -p /root/.cargo/
 touch /root/.cargo/env
@@ -18,9 +21,15 @@ if [ -f ~/.condarc ]; then
   sed -i '/^\s*-\s*nodefaults\s*$/d' ~/.condarc
 fi
 
-micromamba create -n slime python=3.12 pip -c conda-forge -y
+if micromamba env list | awk '{print $1}' | grep -qx slime; then
+  micromamba install -n slime python=3.12 pip -c conda-forge -y
+else
+  micromamba create -n slime python=3.12 pip -c conda-forge -y
+fi
 micromamba activate slime
 export CUDA_HOME="$CONDA_PREFIX"
+
+export GITHUB_PROXY="${GITHUB_PROXY:-https://v4.gh-proxy.com/}"
 
 # Keep these in sync with docker/Dockerfile:
 #   - SGLANG_IMAGE_TAG (ARG)            -> SGLANG_VERSION below
@@ -49,9 +58,10 @@ micromamba install -n slime \
   -c conda-forge \
   -y
 micromamba install -n slime -c conda-forge cudnn -y
-# sglang's editable install builds a Rust extension (sglang-grpc via
-# setuptools-rust), so the conda env needs a working rustc + cargo.
-micromamba install -n slime -c conda-forge rust -y
+# sglang's editable install builds a Rust extension and generates its gRPC
+# bindings, so the conda env needs rustc, cargo, and protoc.
+micromamba install -n slime -c conda-forge rust protobuf libprotobuf -y
+export PROTOC="$CONDA_PREFIX/bin/protoc"
 
 # install sglang. The Dockerfile starts FROM slimerl/sglang:v0.5.15.post1-cu129
 # which already has sglang installed with cu129-built native kernels; we have
@@ -64,12 +74,13 @@ micromamba install -n slime -c conda-forge rust -y
 #      shared dirs (pip uninstall stomps libs co-owned across cu12/cu13).
 if [ ! -d "$BASE_DIR/sglang" ]; then
   cd $BASE_DIR
-  git clone https://github.com/sgl-project/sglang.git
+  git clone "${GITHUB_PROXY}https://github.com/sgl-project/sglang.git"
 fi
 cd $BASE_DIR/sglang
 git checkout ${SGLANG_COMMIT}
 pip install -e "python[all]" --extra-index-url https://download.pytorch.org/whl/cu129
 pip install --force-reinstall "cuda-python==12.9"
+pip install --force-reinstall --no-deps "cuda-toolkit==12.9.1"
 pip install --force-reinstall --no-deps \
   torch==2.11.0+cu129 torchvision==0.26.0+cu129 torchaudio==2.11.0+cu129 \
   --index-url https://download.pytorch.org/whl/cu129
@@ -81,6 +92,8 @@ pip uninstall -y \
   nvidia-cuda-cupti \
   nvidia-cuda-nvrtc \
   nvidia-cuda-runtime \
+  nvidia-cuda-nvcc \
+  nvidia-cuda-tileiras \
   nvidia-cudnn-cu13 \
   nvidia-cufft \
   nvidia-cufile \
@@ -97,6 +110,7 @@ pip uninstall -y \
 pip install --force-reinstall --no-deps \
   nvidia-cublas-cu12 \
   nvidia-cuda-cupti-cu12 \
+  nvidia-cuda-cccl-cu12 \
   nvidia-cuda-nvrtc-cu12 \
   nvidia-cuda-runtime-cu12 \
   nvidia-cudnn-cu12==9.16.0.29 \
@@ -123,20 +137,29 @@ pip install cmake ninja
 # issue #2425 by its SHA256 digest.
 pip uninstall -y flash-attn-4 flash_attn_4 || true
 pip install --no-deps \
-  "https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.11/flash_attn-2.8.3%2Bcu12torch2.11cxx11abiTRUE-cp312-cp312-linux_x86_64.whl#sha256=3d0c8e60f820321eedd7166e79c33cb816263d8be6e35c3f5ba8fe2df6fea697"
+  "${GITHUB_PROXY}https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.11/flash_attn-2.8.3%2Bcu12torch2.11cxx11abiTRUE-cp312-cp312-linux_x86_64.whl#sha256=3d0c8e60f820321eedd7166e79c33cb816263d8be6e35c3f5ba8fe2df6fea697"
 
-pip install flash-linear-attention==0.4.2
+# Its declared torch dependency pins older CUDA runtime wheels. All runtime
+# dependencies are already provided by SGLang, so keep the cu129 stack intact.
+pip install --no-deps flash-linear-attention==0.4.2
 # FlashQLA: optional GDN backend for Qwen3.5/Qwen3-Next (--qwen-gdn-backend flashqla; requires SM90+)
-pip install git+https://github.com/QwenLM/FlashQLA.git@${FLASH_QLA_COMMIT} --no-build-isolation
+pip install "git+${GITHUB_PROXY}https://github.com/QwenLM/FlashQLA.git@${FLASH_QLA_COMMIT}" \
+  --no-deps --no-build-isolation
 # tilelang (matches Dockerfile)
-pip install tilelang -f https://tile-ai.github.io/whl/nightly/cu128/
+pip install --no-deps tilelang -f https://tile-ai.github.io/whl/nightly/cu128/
 
-pip install --no-build-isolation "transformer_engine[pytorch]==2.16.1"
+pip install onnx onnxscript
+pip install --no-deps nvdlfw-inspect
+pip install --no-deps --no-build-isolation \
+  "transformer_engine==2.16.1" \
+  "transformer_engine_cu12==2.16.1" \
+  "transformer_engine_torch==2.16.1"
 
 NVCC_APPEND_FLAGS="--threads 4" \
   pip -v install --disable-pip-version-check --no-cache-dir \
   --no-build-isolation \
-  --config-settings "--build-option=--cpp_ext --cuda_ext --parallel 8" git+https://github.com/NVIDIA/apex.git@10417aceddd7d5d05d7cbf7b0fc2daad1105f8b4
+  --config-settings "--build-option=--cpp_ext --cuda_ext --parallel 8" \
+  "git+${GITHUB_PROXY}https://github.com/NVIDIA/apex.git@10417aceddd7d5d05d7cbf7b0fc2daad1105f8b4"
 
 TMS_CUDA_MAJOR="${TMS_CUDA_MAJOR:-$(python -c 'import torch; print(torch.version.cuda.split(".")[0])')}"
 export TMS_CUDA_MAJOR
@@ -145,16 +168,19 @@ export TMS_CUDA_MAJOR
 # PEP 517 build venv hides them, so the wheel comes out python-only (~46KB)
 # and sglang trips `Only hook_mode=preload supports pauseable CUDA Graph`
 # because the preload .so was never compiled in.
-pip install -v git+https://github.com/zhuzilin/torch_memory_saver.git@${TMS_COMMIT} \
-  --no-cache-dir --force-reinstall --no-build-isolation
-pip install "nvidia-modelopt[torch]>=0.37.0" --no-build-isolation
-pip install https://github.com/zhuzilin/sgl-router/releases/download/v0.3.2-9daabcd/sglang_router-0.3.2-cp38-abi3-manylinux_2_28_x86_64.whl --force-reinstall
+pip install -v "git+${GITHUB_PROXY}https://github.com/zhuzilin/torch_memory_saver.git@${TMS_COMMIT}" \
+  --no-cache-dir --force-reinstall --no-deps --no-build-isolation
+# SGLang already provides torch and its runtime dependencies. ModelOpt's torch
+# extra would otherwise re-resolve the cu129 stack against PyPI's CUDA pins.
+pip install --no-deps "nvidia-modelopt>=0.37.0" --no-build-isolation
+pip install --no-deps --force-reinstall \
+  "${GITHUB_PROXY}https://github.com/zhuzilin/sgl-router/releases/download/v0.3.2-9daabcd/sglang_router-0.3.2-cp38-abi3-manylinux_2_28_x86_64.whl"
 python -c "import sglang_router; assert 'slime' in sglang_router.__version__"
 
 # megatron
 cd $BASE_DIR
 if [ ! -d "$BASE_DIR/Megatron-LM" ]; then
-  git clone https://github.com/NVIDIA/Megatron-LM.git --recursive
+  git clone "${GITHUB_PROXY}https://github.com/NVIDIA/Megatron-LM.git" --recursive
 fi
 # pre-install Megatron's build deps explicitly since we use --no-build-isolation
 pip install "setuptools<80.0.0" pybind11 "packaging>=24.2"
@@ -162,7 +188,8 @@ pip install "setuptools<80.0.0" pybind11 "packaging>=24.2"
 # that subprocess-shells `python3 -m pybind11`; without isolation pip uses the
 # current env's python which already has pybind11 installed. Otherwise the ext
 # is marked optional and silently skipped, which breaks GPT dataset loading.
-cd $BASE_DIR/Megatron-LM && git checkout ${MEGATRON_COMMIT} && pip install -e . --no-build-isolation
+cd $BASE_DIR/Megatron-LM && git checkout ${MEGATRON_COMMIT} && \
+  pip install -e . --no-deps --no-build-isolation
 
 # install slime and apply patches
 
@@ -172,7 +199,21 @@ cd $SLIME_DIR
 # with --no-deps so pip doesn't re-resolve and stomp our pinned native libs
 # (torch+cu129, sglang-kernel+cu129, ...). The Dockerfile does the same thing
 # in two RUN layers (line ~71 + line ~124).
-pip install -r requirements.txt
+pip install --no-deps -r requirements.txt
+# Resolve the lightweight dependencies of packages that are not part of
+# SGLang's dependency set without asking pip to re-resolve torch/CUDA.
+pip install \
+  textual connectrpc dockerfile-parse h2 "protobuf-py>=0.1.1,<0.2" \
+  pyqwest wcmatch "pyjwt[crypto]>=2.10.1" \
+  "sse-starlette>=3.0" platformdirs sentry-sdk absl-py markdown \
+  tensorboard-data-server werkzeug "llvmlite>=0.49.0dev0,<0.50" msgpack \
+  "openai==2.6.1" "openai-agents==0.4.2" "mcp[cli]==1.29.1" \
+  "websockets>=15,<17" "setuptools>=80,<82" socksio \
+  aiohttp-cors colorful "py-spy>=0.4.0" opencensus \
+  "opentelemetry-sdk>=1.30.0" opentelemetry-exporter-prometheus \
+  opentelemetry-proto prometheus-client smart-open \
+  "virtualenv!=20.21.1,>=20.0.24"
+pip install --no-deps "fla-core==0.4.2"
 pip install -e . --no-deps
 
 # int4_qat kernel (matches Dockerfile)
@@ -182,6 +223,7 @@ pip install . --no-build-isolation
 # https://github.com/pytorch/pytorch/issues/168167
 pip install nvidia-cudnn-cu12==9.16.0.29
 pip install "numpy==1.26.4" "scipy==1.17.1"
+pip install "ml-dtypes<0.6" "tifffile<2026"
 # kernels 0.15.x trips a ValueError("Either a revision or a version must be
 # specified") on `transformers.integrations.hub_kernels` import; pin to <0.15
 # so `import sglang` works at runtime.
