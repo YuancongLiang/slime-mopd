@@ -161,6 +161,10 @@ class RolloutManager:
         assert self.args.rollout_global_dataset
         return len(self.data_source) // self.args.rollout_batch_size
 
+    def generate_sync_mopd(self, rollout_id, expected_version, evaluation=False):
+        from slime.opd.synchronous_policy import run_bound_batch
+        return run_bound_batch(self, rollout_id, expected_version, evaluation=evaluation)
+
     def generate(self, rollout_id):
         start_time = time.time()
         self.rollout_id = rollout_id

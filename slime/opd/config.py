@@ -45,6 +45,7 @@ def load_config(path):
         "timeout_seconds": 1800,
         "max_context_tokens": 32768,
         "prefetch_rollouts": False,
+        "sync_policy_binding": False,
         "max_policy_lag_optimizer_steps": 1,
     }
     _keys(cfg, {*defaults, "teachers", "domains", "placement"}, "opd")
@@ -56,6 +57,10 @@ def load_config(path):
     _positive(cfg["max_policy_lag_optimizer_steps"], "max_policy_lag_optimizer_steps", integer=True, zero=True)
     if type(cfg["prefetch_rollouts"]) is not bool:
         raise ValueError("prefetch_rollouts must be a boolean")
+    if type(cfg["sync_policy_binding"]) is not bool:
+        raise ValueError("sync_policy_binding must be a boolean")
+    if cfg["sync_policy_binding"] and cfg["prefetch_rollouts"]:
+        raise ValueError("sync_policy_binding requires prefetch_rollouts=false")
     if cfg["prefetch_rollouts"] and cfg["max_policy_lag_optimizer_steps"] == 0:
         raise ValueError("Prefetched rollouts require at least one optimizer step of allowed policy lag")
     for key in ("student_temperature", "teacher_temperature", "timeout_seconds"):

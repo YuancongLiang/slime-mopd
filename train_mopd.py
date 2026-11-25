@@ -17,6 +17,15 @@ def should_prefetch(config, rollout_id, num_rollout, checkpoint_due):
     return config["prefetch_rollouts"] and rollout_id + 1 < num_rollout and not checkpoint_due
 
 
+def submit_rollout(manager, actor, config, rollout_id, *, evaluation=False):
+    if config["sync_policy_binding"]:
+        return manager.generate_sync_mopd.remote(
+            rollout_id, actor.get_opd_policy_version(), evaluation=evaluation
+        )
+    method = manager.eval if evaluation else manager.generate
+    return method.remote(rollout_id)
+
+
 def train(args):
     configure_logger()
     opd_metrics = PipelineMetrics(args)
@@ -29,6 +38,9 @@ def train(args):
         raise ValueError("The bounded MOPD coordinator publishes weights after every rollout batch")
     if args.rollout_function_path != "slime.rollout.sglang_rollout.generate_rollout":
         raise ValueError("This coordinator currently supports the standard completed-trajectory SGLang rollout")
+    if config["sync_policy_binding"]:
+        from slime.opd.synchronous_policy import validate_sync_config
+        validate_sync_config(args)
     pgs = create_placement_groups(args)
     init_tracking(args)
     rollout_manager, per_epoch = create_rollout_manager(args, pgs["rollout"])
@@ -37,11 +49,11 @@ def train(args):
     pending = None
     try:
         if args.eval_interval is not None and not args.skip_eval_before_train:
-            ray.get(rollout_manager.eval.remote(args.start_rollout_id))
+            ray.get(submit_rollout(rollout_manager, actor, config, args.start_rollout_id, evaluation=True))
         for rollout_id in range(args.start_rollout_id, args.num_rollout):
             opd_metrics.begin()
             if pending is None:
-                pending = rollout_manager.generate.remote(rollout_id)
+                pending = submit_rollout(rollout_manager, actor, config, rollout_id)
             current = ray.get(pending)
             checkpoint_due = should_run_periodic_action(rollout_id, args.save_interval, per_epoch, args.num_rollout)
             pending = None
@@ -61,7 +73,7 @@ def train(args):
             workload = ray.get(rollout_manager.pop_opd_metrics.remote(rollout_id))
             opd_metrics.finish(rollout_id, learner_results, workload, excluded_s)
             if should_run_periodic_action(rollout_id, args.eval_interval, per_epoch):
-                ray.get(rollout_manager.eval.remote(rollout_id))
+                ray.get(submit_rollout(rollout_manager, actor, config, rollout_id, evaluation=True))
     finally:
         if pending is not None:
             ray.cancel(pending)

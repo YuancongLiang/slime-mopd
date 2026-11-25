@@ -602,6 +602,10 @@ class MegatronTrainRayActor(TrainRayActor):
         if self.args.offload_train:
             self.sleep()
 
+    def get_opd_policy_version(self):
+        from slime.opd.synchronous_policy import published_version
+        return published_version(self)
+
     @timer
     def update_weights(self) -> None:
         if self.args.debug_train_only or self.args.debug_rollout_only:

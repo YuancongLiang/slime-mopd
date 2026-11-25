@@ -164,6 +164,12 @@ class RayTrainGroup:
             self.args.no_load_rng = False
         return ret
 
+    def get_opd_policy_version(self):
+        versions = ray.get([actor.get_opd_policy_version.remote() for actor in self._actor_handlers])
+        if not versions or any(v != versions[0] for v in versions):
+            raise ValueError("Learner ranks disagree on the published student policy")
+        return versions[0]
+
     def update_weights(self):
         """Broadcast weights from rank 0 to all other ranks."""
         if not self._full_disk_weight_update_enabled():
